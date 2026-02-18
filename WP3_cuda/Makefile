@@ -1,5 +1,5 @@
 NVCC     = nvcc
-NVFLAGS  = -O3 -std=c++17 -arch=sm_70
+NVFLAGS  = -O3 -std=c++14 -arch=sm_75
 # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 # sm_70 = Volta (V100), sm_75 = Turing (T4/RTX 2000),
 # sm_80 = Ampere (A100/RTX 3000), sm_86 = Ampere (RTX 3060+)

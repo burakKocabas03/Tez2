@@ -104,8 +104,7 @@ __global__ void saKernel(const double* __restrict__ distMat,
     // is still fast thanks to L1/L2 caches.
     // Dynamic shared memory could be used for small n, but local memory
     // is simpler and scales to arbitrary n.
-    int* tour     = bestTours + (long long)tid * n;   // reuse output buffer
-    int* tempTour = nullptr; // we modify tour in-place
+    int* tour = bestTours + (long long)tid * n;   // reuse output buffer
 
     // ── Nearest-Neighbour initial tour from startCity = tid % n ──────────
     int startCity = tid % n;
