@@ -9,11 +9,6 @@ knapsack_serial
 knapsack_openmp
 knapsack_cuda
 
-# Generated data (large files, reproducible via scripts)
-data/random*.tsp
-data/graphs/
-data/knapsack/
-
 # Benchmark results (regenerated each run)
 benchmark/results*.csv
 
