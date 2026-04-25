@@ -1,0 +1,22 @@
+# Compiled binaries
+tsp_serial
+tsp_openmp
+tsp_cuda
+max_clique_serial
+max_clique_openmp
+max_clique_cuda
+knapsack_serial
+knapsack_openmp
+knapsack_cuda
+
+# Benchmark results (regenerated each run)
+benchmark/results*.csv
+
+# OS files
+.DS_Store
+*.swp
+*~
+
+# IDE
+.vscode/
+.idea/
