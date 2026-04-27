@@ -1,18 +1,14 @@
 /**
  * WP4 – GPU-Optimized Maximum Clique
  * ====================================
- * Algorithm: Iterative BK with bitmask adjacency (same as WP3)
+ * Algorithm: Iterative BK with 64-bit bitmask + __ldg + tight pruning
  *
- * Finding: The bitmask-based iterative BK IS the GPU-optimal approach.
- * The GPU advantages come from hardware-native operations:
- *   - __popc() for fast population count
- *   - __ffs() for find-first-set
- *   - Bitmask AND for O(n/32) set intersection
- *   - atomicMax for cross-thread pruning
- *
- * Attempted "optimizations" (explicit candidate arrays, periodic global
- * reads) actually hurt performance due to higher register pressure and
- * overhead from extra atomic operations.
+ * Optimizations over WP3:
+ *   1. 64-bit bitmask (unsigned long long): half the words per row,
+ *      half the loop iterations in AND/popcnt/popLowest
+ *   2. __ldg() for adjacency reads: routes through read-only/texture cache
+ *   3. Tighter pruning: re-check global best after finding a new local best
+ *   4. __popcll() and __ffsll(): native 64-bit GPU instructions
  *
  * Build: nvcc -O3 -std=c++14 -arch=sm_75 -o max_clique_gpu_opt max_clique_gpu_opt.cu
  * Run:   ./max_clique_gpu_opt <num_vertices> <density_percent>
@@ -37,71 +33,71 @@
 } while(0)
 
 static constexpr int MAX_N     = 1024;
-static constexpr int MAX_WORDS = (MAX_N + 31) / 32;
+static constexpr int MAX_WORDS = (MAX_N + 63) / 64;
 static constexpr int MAX_DEPTH = 128;
 
-__device__ inline int bitmaskPopcnt(const unsigned int* mask, int words) {
+typedef unsigned long long uint64;
+
+__device__ inline int bitmaskPopcnt(const uint64* mask, int words) {
     int cnt = 0;
     for (int w = 0; w < words; ++w)
-        cnt += __popc(mask[w]);
+        cnt += __popcll(mask[w]);
     return cnt;
 }
 
-__device__ inline void bitmaskAnd(unsigned int* dst,
-                                  const unsigned int* a,
-                                  const unsigned int* b,
-                                  int words) {
+__device__ inline void bitmaskAnd_ldg(uint64* dst,
+                                      const uint64* a,
+                                      const uint64* __restrict__ b,
+                                      int words) {
     for (int w = 0; w < words; ++w)
-        dst[w] = a[w] & b[w];
+        dst[w] = a[w] & __ldg(&b[w]);
 }
 
-__device__ inline void bitmaskCopy(unsigned int* dst,
-                                   const unsigned int* src,
-                                   int words) {
+__device__ inline void bitmaskCopy(uint64* dst, const uint64* src, int words) {
     for (int w = 0; w < words; ++w)
         dst[w] = src[w];
 }
 
-__device__ inline int bitmaskPopLowest(unsigned int* mask, int words) {
+__device__ inline int bitmaskPopLowest(uint64* mask, int words) {
     for (int w = 0; w < words; ++w) {
-        if (mask[w] != 0) {
-            int bit = __ffs(mask[w]) - 1;
-            mask[w] &= ~(1u << bit);
-            return w * 32 + bit;
+        if (mask[w] != 0ULL) {
+            int bit = __ffsll(mask[w]) - 1;
+            mask[w] &= ~(1ULL << bit);
+            return w * 64 + bit;
         }
     }
     return -1;
 }
 
 __global__ void maxCliqueKernel(
-    const unsigned int* __restrict__ adjBits,
-    const int*          __restrict__ order,
+    const uint64* __restrict__ adjBits,
+    const int*    __restrict__ order,
     int n, int wordsPerRow,
     int* d_globalBestSz)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n) return;
 
-    int globalBestSz = *d_globalBestSz;
+    int globalBestSz = __ldg(d_globalBestSz);
     if (n - tid <= globalBestSz) return;
 
-    int v = order[tid];
+    int v = __ldg(&order[tid]);
 
-    unsigned int P[MAX_WORDS];
-    for (int w = 0; w < wordsPerRow; ++w) P[w] = 0;
+    uint64 P[MAX_WORDS];
+    for (int w = 0; w < wordsPerRow; ++w) P[w] = 0ULL;
 
     for (int j = tid + 1; j < n; ++j) {
-        int u = order[j];
-        if (adjBits[v * wordsPerRow + (u / 32)] & (1u << (u % 32)))
-            P[u / 32] |= (1u << (u % 32));
+        int u = __ldg(&order[j]);
+        if (__ldg(&adjBits[v * wordsPerRow + (u / 64)]) & (1ULL << (u % 64)))
+            P[u / 64] |= (1ULL << (u % 64));
     }
 
     int candSize = bitmaskPopcnt(P, wordsPerRow);
     if (1 + candSize <= globalBestSz) return;
 
     struct Frame {
-        unsigned int P[MAX_WORDS];
-        int          cliqueSize;
+        uint64 P[MAX_WORDS];
+        int    cliqueSize;
     };
 
     Frame stack[MAX_DEPTH];
@@ -123,22 +119,29 @@ __global__ void maxCliqueKernel(
 
         int u = bitmaskPopLowest(frame.P, wordsPerRow);
         if (u < 0) {
-            if (frame.cliqueSize > localBestSz)
+            if (frame.cliqueSize > localBestSz) {
                 localBestSz = frame.cliqueSize;
+                // Re-read global best after finding improvement
+                int gSz = __ldg(d_globalBestSz);
+                if (gSz > localBestSz) localBestSz = gSz;
+            }
             --sp;
             continue;
         }
 
         if (sp + 1 < MAX_DEPTH) {
             Frame& child = stack[sp + 1];
-            bitmaskAnd(child.P, frame.P, &adjBits[u * wordsPerRow], wordsPerRow);
+            bitmaskAnd_ldg(child.P, frame.P, &adjBits[u * wordsPerRow], wordsPerRow);
             child.cliqueSize = frame.cliqueSize + 1;
 
             int childPSize = bitmaskPopcnt(child.P, wordsPerRow);
             if (child.cliqueSize + childPSize > localBestSz) {
                 if (childPSize == 0) {
-                    if (child.cliqueSize > localBestSz)
+                    if (child.cliqueSize > localBestSz) {
                         localBestSz = child.cliqueSize;
+                        int gSz = __ldg(d_globalBestSz);
+                        if (gSz > localBestSz) localBestSz = gSz;
+                    }
                 } else {
                     ++sp;
                     continue;
@@ -183,21 +186,21 @@ int main(int argc, char* argv[]) {
     std::sort(order.begin(), order.end(),
               [&](int a, int b) { return deg[a] > deg[b]; });
 
-    int wordsPerRow = (n + 31) / 32;
-    std::vector<unsigned int> adjBits(n * wordsPerRow, 0u);
+    int wordsPerRow = (n + 63) / 64;
+    std::vector<uint64> adjBits(n * wordsPerRow, 0ULL);
     for (int u = 0; u < n; ++u)
         for (int v = 0; v < n; ++v)
             if (adj[u][v])
-                adjBits[u * wordsPerRow + v / 32] |= (1u << (v % 32));
+                adjBits[u * wordsPerRow + v / 64] |= (1ULL << (v % 64));
 
-    unsigned int* d_adj;
+    uint64* d_adj;
     int *d_order, *d_bestSize;
 
-    CUDA_CHECK(cudaMalloc(&d_adj, sizeof(unsigned int) * n * wordsPerRow));
+    CUDA_CHECK(cudaMalloc(&d_adj, sizeof(uint64) * n * wordsPerRow));
     CUDA_CHECK(cudaMalloc(&d_order, sizeof(int) * n));
     CUDA_CHECK(cudaMalloc(&d_bestSize, sizeof(int)));
 
-    CUDA_CHECK(cudaMemcpy(d_adj, adjBits.data(), sizeof(unsigned int)*n*wordsPerRow, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_adj, adjBits.data(), sizeof(uint64)*n*wordsPerRow, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_order, order.data(), sizeof(int)*n, cudaMemcpyHostToDevice));
     int zero = 0;
     CUDA_CHECK(cudaMemcpy(d_bestSize, &zero, sizeof(int), cudaMemcpyHostToDevice));
@@ -206,7 +209,7 @@ int main(int argc, char* argv[]) {
     int gridSize = (n + blockSize - 1) / blockSize;
 
     std::cout << "═══════════════════════════════════════════════════════\n"
-              << " GPU-Optimized Max Clique (BK + bitmask)\n"
+              << " GPU-Optimized Max Clique (64-bit + __ldg + fixed prune)\n"
               << "═══════════════════════════════════════════════════════\n"
               << " Instance    : random n=" << n << " density=" << densityPct << "% (seed=42)\n"
               << " Vertices    : " << n << "   Edges: " << m << "\n";
