@@ -281,15 +281,10 @@ int main(int argc, char* argv[]) {
                 adjBits[u * wordsPerRow + v / 32] |= (1u << (v % 32));
 
     std::cout << "═══════════════════════════════════════════════════════\n"
-              << " WP3 – Maximum Clique Problem (CUDA)\n"
+              << " WP3 – Max Clique CUDA (BK + bitmask)\n"
               << "═══════════════════════════════════════════════════════\n"
               << " Instance    : random n=" << n << " density=" << densityPct << "% (seed=42)\n"
-              << " Vertices    : " << n << "\n"
-              << " Edges       : " << G.m << "\n"
-              << " Density     : " << std::fixed << std::setprecision(4)
-              << (n > 1 ? (2.0 * G.m) / ((double)n * (n - 1)) : 0.0) << "\n"
-              << " Words/row   : " << wordsPerRow << "\n"
-              << "───────────────────────────────────────────────────────\n";
+              << " Vertices    : " << n << "   Edges: " << G.m << "\n";
 
     // ── Device allocations ───────────────────────────────────────────────
     unsigned int* d_adjBits;
@@ -325,9 +320,9 @@ int main(int argc, char* argv[]) {
     int bestSz;
     CUDA_CHECK(cudaMemcpy(&bestSz, d_globalBestSz, sizeof(int), cudaMemcpyDeviceToHost));
 
-    std::cout << " Maximum clique size : " << bestSz << "\n"
+    std::cout << " Clique size : " << bestSz << "\n"
               << std::setprecision(6)
-              << " Execution time (GPU): " << elapsed << " s\n"
+              << " Time        : " << elapsed << " s\n"
               << "═══════════════════════════════════════════════════════\n";
 
     std::cout << "CSV," << n << "," << G.m << "," << bestSz << "," << elapsed << "\n";

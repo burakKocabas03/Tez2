@@ -141,13 +141,10 @@ int main(int argc, char* argv[]) {
     long long dpCells = (long long)n * (W + 1);
 
     std::cout << "═══════════════════════════════════════════════════════\n"
-              << " WP3 – 0/1 Knapsack Problem (CUDA Parallel DP)\n"
+              << " WP3 – 0/1 Knapsack CUDA (Row-parallel DP)\n"
               << "═══════════════════════════════════════════════════════\n"
-              << " Instance    : random n=" << n << " W=" << W << " (seed=42)\n"
-              << " Items (n)   : " << n << "\n"
-              << " Capacity (W): " << W << "\n"
-              << " DP cells    : " << dpCells << "\n"
-              << "───────────────────────────────────────────────────────\n";
+              << " Instance  : random n=" << n << " W=" << W << " (seed=42)\n"
+              << " Items     : " << n << "   Capacity: " << W << "\n";
 
     // ── Device allocations ───────────────────────────────────────────────
     long long* d_prev;
@@ -189,16 +186,15 @@ int main(int argc, char* argv[]) {
 
     double mpps = (dpCells / 1e6) / elapsed;
 
-    std::cout << " Optimal value       : " << optVal << "\n"
-              << " DP cells computed   : " << dpCells << "\n"
-              << std::fixed << std::setprecision(2)
-              << " Throughput          : " << mpps << " M cells/s\n"
+    std::cout << " Optimal   : " << optVal << "\n"
               << std::setprecision(6)
-              << " Execution time (GPU): " << elapsed << " s\n"
+              << " Time      : " << elapsed << " s\n"
+              << std::fixed << std::setprecision(2)
+              << " Throughput: " << mpps << " Mcells/s\n"
               << "═══════════════════════════════════════════════════════\n";
 
     std::cout << "CSV," << n << "," << W << ","
-              << optVal << "," << elapsed << "," << dpCells << "\n";
+              << optVal << "," << elapsed << "," << mpps << "\n";
 
     cudaFree(d_prev);
     cudaFree(d_curr);

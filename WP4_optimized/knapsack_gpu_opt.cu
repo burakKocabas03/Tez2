@@ -116,7 +116,9 @@ int main(int argc, char* argv[]) {
         int wi = weights[i];
         int vi = values[i];
 
-        if (useTiling) {
+        // Tiling only helps when wi < blockSize (lookup stays within tile)
+        // For large wi, the simple kernel is faster (no sync overhead)
+        if (useTiling && wi < blockSize) {
             knapsack_tiled_kernel<<<gridSize, blockSize, sharedMem>>>(
                 d_prev, d_curr, W, wi, vi);
         } else {

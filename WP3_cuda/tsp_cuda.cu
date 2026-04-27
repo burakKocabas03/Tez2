@@ -251,20 +251,13 @@ int main(int argc, char* argv[]) {
         nnCost += hostDist[curr * n + 0];
         std::cout << std::fixed << std::setprecision(2);
         std::cout << "═══════════════════════════════════════════════════════\n"
-                  << " WP3 – TSP CUDA (Simulated Annealing)\n"
+                  << " WP3 – TSP CUDA (SA, " << numChains << " chains)\n"
                   << "═══════════════════════════════════════════════════════\n"
                   << " Instance       : random " << n << " cities (seed=42)\n"
-                  << " Total iters    : " << totalIter     << "\n"
                   << " Iters/chain    : " << itersPerChain << "\n"
-                  << " Chains (threads): " << numChains     << "\n"
-                  << " init_temp      : " << initTemp      << "\n"
-                  << " cooling_rate   : " << std::setprecision(8) << coolRate << "\n"
-                  << "───────────────────────────────────────────────────────\n"
-                  << std::setprecision(2)
-                  << " Nearest-Neighbour cost : " << nnCost << "\n";
+                  << " NN cost        : " << nnCost << "\n";
     }
 
-    // ── Allocate device memory ───────────────────────────────────────────
     double*      d_distMat;
     curandState* d_states;
     double*      d_bestCosts;
@@ -278,14 +271,12 @@ int main(int argc, char* argv[]) {
     CUDA_CHECK(cudaMemcpy(d_distMat, hostDist.data(),
                           sizeof(double) * n * n, cudaMemcpyHostToDevice));
 
-    // ── Launch RNG init ──────────────────────────────────────────────────
     int blockSize = 256;
     int gridSize  = (numChains + blockSize - 1) / blockSize;
 
     initRNG<<<gridSize, blockSize>>>(d_states, numChains, 42ULL);
     CUDA_CHECK(cudaGetLastError());
 
-    // ── Launch SA kernel ─────────────────────────────────────────────────
     auto t0 = std::chrono::high_resolution_clock::now();
 
     saKernel<<<gridSize, blockSize>>>(
@@ -297,12 +288,10 @@ int main(int argc, char* argv[]) {
     auto t1 = std::chrono::high_resolution_clock::now();
     double elapsed = std::chrono::duration<double>(t1 - t0).count();
 
-    // ── Copy results back ────────────────────────────────────────────────
     std::vector<double> hostBestCosts(numChains);
     CUDA_CHECK(cudaMemcpy(hostBestCosts.data(), d_bestCosts,
                           sizeof(double) * numChains, cudaMemcpyDeviceToHost));
 
-    // Find the best chain
     int    bestChain = 0;
     double bestCost  = hostBestCosts[0];
     for (int i = 1; i < numChains; ++i)
@@ -311,12 +300,11 @@ int main(int argc, char* argv[]) {
             bestChain = i;
         }
 
-    // ── Report ───────────────────────────────────────────────────────────
-    std::cout << " SA best tour cost      : " << bestCost   << "\n";
-    std::cout << " Best chain ID          : " << bestChain  << "\n";
-    std::cout << std::setprecision(6);
-    std::cout << " Execution time (GPU)   : " << elapsed    << " s\n";
-    std::cout << "═══════════════════════════════════════════════════════\n";
+    std::cout << " Best tour cost : " << bestCost << "\n"
+              << " Best chain     : " << bestChain << "\n"
+              << std::setprecision(6)
+              << " Execution time : " << elapsed << " s\n"
+              << "═══════════════════════════════════════════════════════\n";
 
     std::cout << "CSV," << n << "," << numChains << ","
               << std::setprecision(4) << bestCost << "," << elapsed << "\n";
