@@ -43,17 +43,16 @@
  * Author   : Emin Özgür Elmalı
  * Advisor  : Prof. Dr. Hasan BULUT
  *
- * Build    : nvcc -O3 -std=c++17 -o knapsack_cuda knapsack_cuda.cu
- * Run      : ./knapsack_cuda <instance_file>
+ * Build    : nvcc -O3 -std=c++14 -arch=sm_75 -o knapsack_cuda knapsack_cuda.cu
+ * Run      : ./knapsack_cuda <num_items> <capacity>
  */
 
 #include <iostream>
 #include <vector>
 #include <algorithm>
 #include <chrono>
-#include <fstream>
-#include <string>
 #include <iomanip>
+#include <random>
 
 #include <cuda_runtime.h>
 
@@ -98,7 +97,7 @@ __global__ void knapsackRowKernel(const long long* __restrict__ prev,
 }
 
 // ---------------------------------------------------------------------------
-//  Host: instance reader
+//  Host: random instance generator
 // ---------------------------------------------------------------------------
 
 struct KnapsackInstance {
@@ -108,18 +107,19 @@ struct KnapsackInstance {
     std::vector<int> value;
 };
 
-KnapsackInstance readInstance(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "[ERROR] Cannot open: " << filename << "\n";
-        std::exit(EXIT_FAILURE);
-    }
+KnapsackInstance generateRandom(int n, long long W, unsigned seed = 42) {
     KnapsackInstance inst;
-    file >> inst.n >> inst.W;
-    inst.weight.resize(inst.n);
-    inst.value .resize(inst.n);
-    for (int i = 0; i < inst.n; ++i)
-        file >> inst.weight[i] >> inst.value[i];
+    inst.n = n;
+    inst.W = W;
+    inst.weight.resize(n);
+    inst.value.resize(n);
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> distW(1, std::max(1LL, W / 10));
+    std::uniform_int_distribution<int> distV(10, 1000);
+    for (int i = 0; i < n; ++i) {
+        inst.weight[i] = distW(rng);
+        inst.value[i] = distV(rng);
+    }
     return inst;
 }
 
@@ -128,12 +128,14 @@ KnapsackInstance readInstance(const std::string& filename) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <instance_file>\n";
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <num_items> <capacity>\n";
         return EXIT_FAILURE;
     }
 
-    auto inst = readInstance(argv[1]);
+    int n_items = std::stoi(argv[1]);
+    long long cap = std::stoll(argv[2]);
+    auto inst = generateRandom(n_items, cap);
     int       n = inst.n;
     long long W = inst.W;
     long long dpCells = (long long)n * (W + 1);
@@ -141,7 +143,7 @@ int main(int argc, char* argv[]) {
     std::cout << "═══════════════════════════════════════════════════════\n"
               << " WP3 – 0/1 Knapsack Problem (CUDA Parallel DP)\n"
               << "═══════════════════════════════════════════════════════\n"
-              << " Instance    : " << argv[1] << "\n"
+              << " Instance    : random n=" << n << " W=" << W << " (seed=42)\n"
               << " Items (n)   : " << n << "\n"
               << " Capacity (W): " << W << "\n"
               << " DP cells    : " << dpCells << "\n"

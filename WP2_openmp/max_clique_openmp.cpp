@@ -34,7 +34,7 @@
  * Advisor  : Prof. Dr. Hasan BULUT
  *
  * Build    : see Makefile  (requires libomp on macOS: brew install libomp)
- * Run      : ./max_clique_openmp <dimacs_graph_file> [num_threads]
+ * Run      : ./max_clique_openmp <num_vertices> <density_percent> [num_threads]
  */
 
 #include <iostream>
@@ -47,6 +47,7 @@
 #include <iomanip>
 #include <numeric>
 #include <atomic>
+#include <random>
 
 #include <omp.h>
 
@@ -115,39 +116,17 @@ static void bk(const Graph&             G,
 }
 
 // ---------------------------------------------------------------------------
-//  DIMACS reader
+//  Random graph generator
 // ---------------------------------------------------------------------------
 
-Graph readDIMACS(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "[ERROR] Cannot open file: " << filename << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-
-    int n = 0, m = 0;
-    std::string line;
-
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == 'c') continue;
-        if (line[0] == 'p') {
-            std::istringstream iss(line);
-            std::string t1, t2;
-            iss >> t1 >> t2 >> n >> m;
-            break;
-        }
-    }
-
+Graph generateRandomGraph(int n, int densityPct, unsigned seed = 42) {
     Graph G(n);
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == 'c') continue;
-        if (line[0] == 'e') {
-            std::istringstream iss(line);
-            char ch; int u, v;
-            iss >> ch >> u >> v;
-            G.addEdge(u - 1, v - 1);
-        }
-    }
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> pctDist(0, 99);
+    for (int u = 0; u < n; ++u)
+        for (int v = u + 1; v < n; ++v)
+            if (pctDist(rng) < densityPct)
+                G.addEdge(u, v);
     return G;
 }
 
@@ -156,13 +135,15 @@ Graph readDIMACS(const std::string& filename) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <dimacs_graph_file> [num_threads]\n";
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <num_vertices> <density_percent> [num_threads]\n";
         return EXIT_FAILURE;
     }
 
-    const Graph G      = readDIMACS(argv[1]);
-    int numThreads = (argc > 2) ? std::stoi(argv[2]) : omp_get_max_threads();
+    int nVert = std::stoi(argv[1]);
+    int densityPct = std::stoi(argv[2]);
+    const Graph G = generateRandomGraph(nVert, densityPct);
+    int numThreads = (argc > 3) ? std::stoi(argv[3]) : omp_get_max_threads();
     if (numThreads > omp_get_max_threads())
         numThreads = omp_get_max_threads();
     omp_set_num_threads(numThreads);
@@ -177,7 +158,7 @@ int main(int argc, char* argv[]) {
     std::cout << "═══════════════════════════════════════════════════════\n";
     std::cout << " WP2 – Maximum Clique Problem (OpenMP Parallel)\n";
     std::cout << "═══════════════════════════════════════════════════════\n";
-    std::cout << " Instance    : " << argv[1] << "\n";
+    std::cout << " Instance    : random n=" << G.n << " density=" << densityPct << "% (seed=42)\n";
     std::cout << " Vertices    : " << G.n << "\n";
     std::cout << " Edges       : " << G.m << "\n";
     std::cout << " Threads     : " << numThreads << "\n";

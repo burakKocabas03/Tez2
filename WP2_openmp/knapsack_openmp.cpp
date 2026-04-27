@@ -54,7 +54,7 @@
  * Advisor  : Prof. Dr. Hasan BULUT
  *
  * Build    : see Makefile  (requires libomp on macOS: brew install libomp)
- * Run      : ./knapsack_openmp <instance_file> [num_threads]
+ * Run      : ./knapsack_openmp <num_items> <capacity> [num_threads]
  */
 
 #include <iostream>
@@ -64,6 +64,7 @@
 #include <fstream>
 #include <string>
 #include <iomanip>
+#include <random>
 
 #include <omp.h>
 
@@ -78,21 +79,19 @@ struct KnapsackInstance {
     std::vector<int> value;
 };
 
-KnapsackInstance readInstance(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "[ERROR] Cannot open file: " << filename << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-
+KnapsackInstance generateRandom(int n, long long W, unsigned seed = 42) {
     KnapsackInstance inst;
-    file >> inst.n >> inst.W;
-    inst.weight.resize(inst.n);
-    inst.value .resize(inst.n);
-
-    for (int i = 0; i < inst.n; ++i)
-        file >> inst.weight[i] >> inst.value[i];
-
+    inst.n = n;
+    inst.W = W;
+    inst.weight.resize(n);
+    inst.value.resize(n);
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> distW(1, std::max(1LL, W / 10));
+    std::uniform_int_distribution<int> distV(10, 1000);
+    for (int i = 0; i < n; ++i) {
+        inst.weight[i] = distW(rng);
+        inst.value[i] = distV(rng);
+    }
     return inst;
 }
 
@@ -159,21 +158,22 @@ KnapsackResult solveKnapsack(const KnapsackInstance& inst, int numThreads) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <instance_file> [num_threads]\n"
-                  << "  Format: first line 'N W', then N lines 'weight value'\n";
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <num_items> <capacity> [num_threads]\n";
         return EXIT_FAILURE;
     }
 
-    const auto inst = readInstance(argv[1]);
-    int numThreads  = (argc > 2) ? std::stoi(argv[2]) : omp_get_max_threads();
+    int n_items = std::stoi(argv[1]);
+    long long cap = std::stoll(argv[2]);
+    const auto inst = generateRandom(n_items, cap);
+    int numThreads  = (argc > 3) ? std::stoi(argv[3]) : omp_get_max_threads();
     if (numThreads > omp_get_max_threads())
         numThreads = omp_get_max_threads();
 
     std::cout << "═══════════════════════════════════════════════════════\n";
     std::cout << " WP2 – 0/1 Knapsack Problem (OpenMP Parallel DP)\n";
     std::cout << "═══════════════════════════════════════════════════════\n";
-    std::cout << " Instance    : " << argv[1]  << "\n";
+    std::cout << " Instance    : random n=" << inst.n << " W=" << inst.W << " (seed=42)\n";
     std::cout << " Items (n)   : " << inst.n   << "\n";
     std::cout << " Capacity (W): " << inst.W   << "\n";
     std::cout << " DP cells    : " << static_cast<long long>(inst.n) * (inst.W + 1) << "\n";

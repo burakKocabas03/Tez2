@@ -29,7 +29,7 @@
  * Advisor  : Prof. Dr. Hasan BULUT
  *
  * Build    : see Makefile  (requires libomp on macOS: brew install libomp)
- * Run      : ./tsp_openmp <tsp_file> [max_iter] [init_temp] [cooling_rate] [num_threads]
+ * Run      : ./tsp_openmp <num_cities> [max_iter] [init_temp] [cooling_rate] [num_threads]
  */
 
 #include <iostream>
@@ -47,13 +47,29 @@
 #include <omp.h>
 
 // ---------------------------------------------------------------------------
-//  Data structures  (identical to WP1 for a fair comparison)
+//  Random instance generator
 // ---------------------------------------------------------------------------
 
 struct City {
     int    id;
     double x, y;
 };
+
+std::vector<City> generateRandomCities(int n, unsigned seed = 42) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> coordDist(0.0, 1000.0);
+    std::vector<City> cities(n);
+    for (int i = 0; i < n; ++i) {
+        cities[i].id = i;
+        cities[i].x = coordDist(rng);
+        cities[i].y = coordDist(rng);
+    }
+    return cities;
+}
+
+// ---------------------------------------------------------------------------
+//  Data structures  (identical to WP1 for a fair comparison)
+// ---------------------------------------------------------------------------
 
 /**
  * Flat, row-major distance matrix shared (read-only) across all threads.
@@ -191,39 +207,6 @@ ThreadResult runSA(const DistMatrix& dm,
     return {bestTour, bestCost, accepted, iter, tid};
 }
 
-// ---------------------------------------------------------------------------
-//  TSPLIB reader  (EUC_2D)
-// ---------------------------------------------------------------------------
-
-std::vector<City> readTSPLIB(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "[ERROR] Cannot open file: " << filename << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-
-    std::vector<City> cities;
-    std::string       line;
-    bool              inNodes = false;
-
-    while (std::getline(file, line)) {
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
-            line.pop_back();
-
-        if (line == "NODE_COORD_SECTION") { inNodes = true;  continue; }
-        if (line == "EOF")                {                   break;    }
-
-        if (inNodes && !line.empty()) {
-            std::istringstream iss(line);
-            City c;
-            if (iss >> c.id >> c.x >> c.y) {
-                c.id--;
-                cities.push_back(c);
-            }
-        }
-    }
-    return cities;
-}
 
 // ---------------------------------------------------------------------------
 //  Main
@@ -233,18 +216,13 @@ int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr
             << "Usage: " << argv[0]
-            << " <tsp_file> [max_iter] [init_temp] [cooling_rate] [num_threads]\n\n"
-            << "  tsp_file:     TSPLIB EUC_2D instance\n"
-            << "  max_iter:     total SA iterations  (default: n*n*100)\n"
-            << "  init_temp:    initial temperature   (default: 1000.0)\n"
-            << "  cooling_rate: geometric factor      (default: 0.99995)\n"
-            << "  num_threads:  OpenMP thread count   (default: all hardware threads)\n";
+            << " <num_cities> [max_iter] [init_temp] [cooling_rate] [num_threads]\n";
         return EXIT_FAILURE;
     }
 
-    // ── Load instance ────────────────────────────────────────────────────────
-    const auto cities = readTSPLIB(argv[1]);
-    const int  n      = static_cast<int>(cities.size());
+    // ── Generate random instance ─────────────────────────────────────────────
+    const int  n      = std::stoi(argv[1]);
+    const auto cities = generateRandomCities(n);
 
     // ── Parse optional parameters ────────────────────────────────────────────
     const long long maxIter     = (argc > 2) ? std::stoll(argv[2])          : (long long)n * n * 100;
@@ -278,7 +256,7 @@ int main(int argc, char* argv[]) {
     std::cout << "═══════════════════════════════════════════════════════\n";
     std::cout << " WP2 – TSP OpenMP Parallel (Simulated Annealing)\n";
     std::cout << "═══════════════════════════════════════════════════════\n";
-    std::cout << " Instance       : " << argv[1] << "  (" << n << " cities)\n";
+    std::cout << " Instance       : random " << n << " cities (seed=42)\n";
     std::cout << " max_iter       : " << maxIter        << "\n";
     std::cout << " iters/thread   : " << itersPerThread << "\n";
     std::cout << " init_temp      : " << initTemp       << "\n";

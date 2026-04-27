@@ -25,8 +25,8 @@
  * Author   : Emin Özgür Elmalı
  * Advisor  : Prof. Dr. Hasan BULUT
  *
- * Build    : nvcc -O3 -std=c++17 -o tsp_cuda tsp_cuda.cu
- * Run      : ./tsp_cuda <tsp_file> [max_iter] [init_temp] [num_chains]
+ * Build    : nvcc -O3 -std=c++14 -arch=sm_75 -o tsp_cuda tsp_cuda.cu
+ * Run      : ./tsp_cuda <num_cities> [max_iter] [init_temp] [num_chains]
  */
 
 #include <iostream>
@@ -34,11 +34,9 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
-#include <fstream>
-#include <sstream>
 #include <iomanip>
 #include <limits>
-#include <string>
+#include <random>
 
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
@@ -198,37 +196,6 @@ __global__ void saKernel(const double* __restrict__ distMat,
     states[tid]    = localState;
 }
 
-// ---------------------------------------------------------------------------
-//  Host-side TSPLIB reader
-// ---------------------------------------------------------------------------
-
-struct City { int id; double x, y; };
-
-std::vector<City> readTSPLIB(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "[ERROR] Cannot open file: " << filename << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-    std::vector<City> cities;
-    std::string line;
-    bool inNodes = false;
-    while (std::getline(file, line)) {
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
-            line.pop_back();
-        if (line == "NODE_COORD_SECTION") { inNodes = true; continue; }
-        if (line == "EOF") break;
-        if (inNodes && !line.empty()) {
-            std::istringstream iss(line);
-            City c;
-            if (iss >> c.id >> c.x >> c.y) {
-                c.id--;
-                cities.push_back(c);
-            }
-        }
-    }
-    return cities;
-}
 
 // ---------------------------------------------------------------------------
 //  Main
@@ -236,19 +203,19 @@ std::vector<City> readTSPLIB(const std::string& filename) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr
-            << "Usage: " << argv[0]
-            << " <tsp_file> [max_iter] [init_temp] [num_chains]\n\n"
-            << "  tsp_file:   TSPLIB EUC_2D instance\n"
-            << "  max_iter:   total SA iterations (split across chains)\n"
-            << "  init_temp:  initial temperature   (default: 1000.0)\n"
-            << "  num_chains: number of GPU threads  (default: 256)\n";
+        std::cerr << "Usage: " << argv[0]
+                  << " <num_cities> [max_iter] [init_temp] [num_chains]\n";
         return EXIT_FAILURE;
     }
 
-    // ── Load instance on host ────────────────────────────────────────────
-    auto cities = readTSPLIB(argv[1]);
-    int  n      = static_cast<int>(cities.size());
+    int n = std::stoi(argv[1]);
+
+    // Generate random cities
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<double> coordDist(0.0, 1000.0);
+    struct City { double x, y; };
+    std::vector<City> cities(n);
+    for (int i = 0; i < n; ++i) { cities[i].x = coordDist(rng); cities[i].y = coordDist(rng); }
 
     long long totalIter = (argc > 2) ? std::stoll(argv[2]) : (long long)n * n * 100;
     double    initTemp  = (argc > 3) ? std::stod(argv[3])  : 1000.0;
@@ -286,7 +253,7 @@ int main(int argc, char* argv[]) {
         std::cout << "═══════════════════════════════════════════════════════\n"
                   << " WP3 – TSP CUDA (Simulated Annealing)\n"
                   << "═══════════════════════════════════════════════════════\n"
-                  << " Instance       : " << argv[1] << "  (" << n << " cities)\n"
+                  << " Instance       : random " << n << " cities (seed=42)\n"
                   << " Total iters    : " << totalIter     << "\n"
                   << " Iters/chain    : " << itersPerChain << "\n"
                   << " Chains (threads): " << numChains     << "\n"

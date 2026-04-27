@@ -33,19 +33,17 @@
  * Author   : Emin Özgür Elmalı
  * Advisor  : Prof. Dr. Hasan BULUT
  *
- * Build    : nvcc -O3 -std=c++17 -o max_clique_cuda max_clique_cuda.cu
- * Run      : ./max_clique_cuda <dimacs_graph_file>
+ * Build    : nvcc -O3 -std=c++14 -arch=sm_75 -o max_clique_cuda max_clique_cuda.cu
+ * Run      : ./max_clique_cuda <num_vertices> <density_percent>
  */
 
 #include <iostream>
 #include <vector>
 #include <algorithm>
 #include <chrono>
-#include <fstream>
-#include <sstream>
-#include <string>
 #include <iomanip>
 #include <numeric>
+#include <random>
 
 #include <cuda_runtime.h>
 
@@ -217,7 +215,7 @@ __global__ void maxCliqueKernel(const unsigned int* __restrict__ adjBits,
 }
 
 // ---------------------------------------------------------------------------
-//  Host: DIMACS reader
+//  Host: Graph structure and random generator
 // ---------------------------------------------------------------------------
 
 struct Graph {
@@ -236,33 +234,14 @@ struct Graph {
     }
 };
 
-Graph readDIMACS(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "[ERROR] Cannot open: " << filename << "\n";
-        std::exit(EXIT_FAILURE);
-    }
-    int n = 0, m = 0;
-    std::string line;
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == 'c') continue;
-        if (line[0] == 'p') {
-            std::istringstream iss(line);
-            std::string t1, t2;
-            iss >> t1 >> t2 >> n >> m;
-            break;
-        }
-    }
+Graph generateRandomGraph(int n, int densityPct, unsigned seed = 42) {
     Graph G(n);
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == 'c') continue;
-        if (line[0] == 'e') {
-            std::istringstream iss(line);
-            char ch; int u, v;
-            iss >> ch >> u >> v;
-            G.addEdge(u - 1, v - 1);
-        }
-    }
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> pctDist(0, 99);
+    for (int u = 0; u < n; ++u)
+        for (int v = u + 1; v < n; ++v)
+            if (pctDist(rng) < densityPct)
+                G.addEdge(u, v);
     return G;
 }
 
@@ -271,12 +250,14 @@ Graph readDIMACS(const std::string& filename) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <dimacs_graph_file>\n";
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <num_vertices> <density_percent>\n";
         return EXIT_FAILURE;
     }
 
-    Graph G = readDIMACS(argv[1]);
+    int nVert = std::stoi(argv[1]);
+    int densityPct = std::stoi(argv[2]);
+    Graph G = generateRandomGraph(nVert, densityPct);
     int n = G.n;
 
     if (n > MAX_N) {
@@ -302,7 +283,7 @@ int main(int argc, char* argv[]) {
     std::cout << "═══════════════════════════════════════════════════════\n"
               << " WP3 – Maximum Clique Problem (CUDA)\n"
               << "═══════════════════════════════════════════════════════\n"
-              << " Instance    : " << argv[1] << "\n"
+              << " Instance    : random n=" << n << " density=" << densityPct << "% (seed=42)\n"
               << " Vertices    : " << n << "\n"
               << " Edges       : " << G.m << "\n"
               << " Density     : " << std::fixed << std::setprecision(4)
