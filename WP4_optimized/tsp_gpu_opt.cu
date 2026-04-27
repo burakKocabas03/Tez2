@@ -3,19 +3,8 @@
  * ========================
  * Algorithm: Massively Parallel SA with shared memory distance matrix caching
  *
- * Improvements over WP3:
- *   - Shared memory: small distance matrices (n<=256) cached in __shared__
- *   - More chains: 2048-4096 chains for broader search
- *   - O(n²) swap-based NN initialization (fixed from O(n³))
- *   - Warp-level parallel reduction for finding global best
- *
- * GPU advantages exploited:
- *   - Thousands of independent SA chains (massive parallelism)
- *   - Shared memory reduces global memory latency for distance lookups
- *   - cuRAND XORWOW per-thread RNG in registers
- *
  * Build: nvcc -O3 -std=c++14 -arch=sm_75 -o tsp_gpu_opt tsp_gpu_opt.cu
- * Run:   ./tsp_gpu_opt <tsp_file> [max_iter] [init_temp] [num_chains]
+ * Run:   ./tsp_gpu_opt <num_cities> [max_iter] [init_temp] [num_chains]
  */
 
 #include <iostream>
@@ -23,11 +12,8 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
-#include <fstream>
-#include <sstream>
 #include <iomanip>
-#include <limits>
-#include <string>
+#include <random>
 
 #include <cuda_runtime.h>
 #include <curand_kernel.h>
@@ -58,7 +44,6 @@ __global__ void saKernel_Optimized(
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= numChains) return;
 
-    // Shared memory for distance matrix (small instances)
     extern __shared__ double sharedDist[];
 
     if (useShared && n <= MAX_SHARED_N) {
@@ -74,7 +59,6 @@ __global__ void saKernel_Optimized(
     curandState localState = states[tid];
     int* tour = bestTours + (long long)tid * n;
 
-    // O(n²) swap-based NN initialization
     int startCity = tid % n;
     for (int i = 0; i < n; ++i) tour[i] = i;
     tour[startCity] = 0;
@@ -126,38 +110,22 @@ __global__ void saKernel_Optimized(
     states[tid] = localState;
 }
 
-struct City { int id; double x, y; };
-
-std::vector<City> readTSPLIB(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) { std::cerr << "Cannot open " << filename << "\n"; std::exit(1); }
-    std::vector<City> cities;
-    std::string line;
-    bool inNodes = false;
-    while (std::getline(file, line)) {
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
-        if (line == "NODE_COORD_SECTION") { inNodes = true; continue; }
-        if (line == "EOF") break;
-        if (inNodes && !line.empty()) {
-            std::istringstream iss(line);
-            City c;
-            if (iss >> c.id >> c.x >> c.y) { c.id--; cities.push_back(c); }
-        }
-    }
-    return cities;
-}
-
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <tsp_file> [max_iter] [init_temp] [num_chains]\n";
+        std::cerr << "Usage: " << argv[0] << " <num_cities> [max_iter] [init_temp] [num_chains]\n";
         return 1;
     }
 
-    auto cities = readTSPLIB(argv[1]);
-    int n = (int)cities.size();
+    int n = std::stoi(argv[1]);
     long long totalIter = (argc > 2) ? std::stoll(argv[2]) : (long long)n * n * 100;
     double initTemp = (argc > 3) ? std::stod(argv[3]) : 1000.0;
     int numChains = (argc > 4) ? std::stoi(argv[4]) : 2048;
+
+    // Generate random cities
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<double> coordDist(0.0, 1000.0);
+    std::vector<double> cx(n), cy(n);
+    for (int i = 0; i < n; ++i) { cx[i] = coordDist(rng); cy[i] = coordDist(rng); }
 
     long long itersPerChain = std::max(1LL, totalIter / numChains);
     double coolRate = std::exp(std::log(1e-9 / initTemp) / (double)itersPerChain);
@@ -165,18 +133,17 @@ int main(int argc, char* argv[]) {
     std::vector<double> hostDist(n * n, 0.0);
     for (int i = 0; i < n; ++i)
         for (int j = i + 1; j < n; ++j) {
-            double dx = cities[i].x - cities[j].x;
-            double dy = cities[i].y - cities[j].y;
+            double dx = cx[i] - cx[j], dy = cy[i] - cy[j];
             double d = std::sqrt(dx * dx + dy * dy);
             hostDist[i * n + j] = d;
             hostDist[j * n + i] = d;
         }
 
     // NN cost for reference
+    double nnCost = 0.0;
     {
         std::vector<bool> vis(n, false);
         int curr = 0; vis[0] = true;
-        double nnCost = 0.0;
         for (int step = 1; step < n; ++step) {
             double best = 1e30; int next = -1;
             for (int j = 0; j < n; ++j)
@@ -184,14 +151,15 @@ int main(int argc, char* argv[]) {
             nnCost += best; vis[next] = true; curr = next;
         }
         nnCost += hostDist[curr * n + 0];
-        std::cout << std::fixed << std::setprecision(2);
-        std::cout << "═══════════════════════════════════════════════════════\n"
-                  << " GPU-Optimized TSP (SA + shared mem, " << numChains << " chains)\n"
-                  << "═══════════════════════════════════════════════════════\n"
-                  << " Instance       : " << argv[1] << "  (" << n << " cities)\n"
-                  << " Iters/chain    : " << itersPerChain << "\n"
-                  << " NN cost        : " << nnCost << "\n";
     }
+
+    std::cout << std::fixed << std::setprecision(2);
+    std::cout << "═══════════════════════════════════════════════════════\n"
+              << " GPU-Optimized TSP (SA + shared mem, " << numChains << " chains)\n"
+              << "═══════════════════════════════════════════════════════\n"
+              << " Instance       : random " << n << " cities (seed=42)\n"
+              << " Iters/chain    : " << itersPerChain << "\n"
+              << " NN cost        : " << nnCost << "\n";
 
     double *d_dist, *d_bestCosts;
     curandState *d_states;

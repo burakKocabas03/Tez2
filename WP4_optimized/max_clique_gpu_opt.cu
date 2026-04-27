@@ -1,32 +1,20 @@
 /**
  * WP4 – GPU-Optimized Maximum Clique
  * ====================================
- * Algorithm: Warp-Cooperative BK with bitmask adjacency
- *
- * Improvements over WP3:
- *   - Warp-cooperative: 32 threads in a warp collaboratively explore one subtree
- *   - Parallel candidate intersection using warp-level __ballot_sync
- *   - Shared memory for adjacency bitmask of active vertices
- *   - Better load balancing: each warp picks work from a shared queue
- *
- * GPU advantages exploited:
- *   - __popc() for fast population count (hardware instruction)
- *   - Warp-synchronous execution: no explicit synchronization within a warp
- *   - Coalesced bitmask reads from shared/global memory
+ * Algorithm: Iterative BK with bitmask adjacency + atomicMax pruning
  *
  * Build: nvcc -O3 -std=c++14 -arch=sm_75 -o max_clique_gpu_opt max_clique_gpu_opt.cu
- * Run:   ./max_clique_gpu_opt <dimacs_file>
+ * Run:   ./max_clique_gpu_opt <num_vertices> <density_percent>
+ *        e.g. ./max_clique_gpu_opt 100 50
  */
 
 #include <iostream>
 #include <vector>
 #include <algorithm>
 #include <chrono>
-#include <fstream>
-#include <sstream>
-#include <string>
 #include <iomanip>
 #include <numeric>
+#include <random>
 #include <cuda_runtime.h>
 
 #define CUDA_CHECK(call) do { \
@@ -39,7 +27,6 @@
 } while(0)
 
 static constexpr int MAX_N = 512;
-static constexpr int WORDS_PER_ROW = (MAX_N + 31) / 32;
 static constexpr int MAX_STACK = 64;
 
 struct StackFrame {
@@ -83,7 +70,6 @@ __global__ void clique_kernel(
             candidates[candCount++] = u;
     }
 
-    // Iterative B&B with explicit stack
     StackFrame stack[MAX_STACK];
     int stackTop = 0;
 
@@ -125,7 +111,6 @@ __global__ void clique_kernel(
         int v = candidates[ci];
         ++ci;
 
-        // Save state
         if (stackTop < MAX_STACK) {
             stack[stackTop].cliqueSize = cliqueSize;
             stack[stackTop].candStart = ci;
@@ -133,7 +118,6 @@ __global__ void clique_kernel(
             ++stackTop;
         }
 
-        // Build new candidate list: intersection with adj[v]
         int newCount = 0;
         for (int j = ci; j < candCount; ++j) {
             int u = candidates[j];
@@ -145,74 +129,51 @@ __global__ void clique_kernel(
         clique[cliqueSize] = v;
         ++cliqueSize;
 
-        // Replace candidates with newCandidates
         for (int j = 0; j < newCount; ++j) candidates[j] = newCandidates[j];
         candCount = newCount;
         ci = 0;
     }
 }
 
-struct Graph {
-    int n = 0, m = 0;
-    std::vector<std::vector<bool>> adj;
-    std::vector<int> deg;
-    explicit Graph(int n_) : n(n_), adj(n_, std::vector<bool>(n_, false)), deg(n_, 0) {}
-    void addEdge(int u, int v) {
-        if (!adj[u][v]) { adj[u][v] = adj[v][u] = true; ++deg[u]; ++deg[v]; ++m; }
-    }
-};
-
-Graph readDIMACS(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) { std::cerr << "Cannot open " << filename << "\n"; std::exit(1); }
-    int n = 0, m = 0;
-    std::string line;
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == 'c') continue;
-        if (line[0] == 'p') {
-            std::istringstream iss(line);
-            std::string t1, t2;
-            iss >> t1 >> t2 >> n >> m;
-            break;
-        }
-    }
-    Graph G(n);
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == 'c') continue;
-        if (line[0] == 'e') {
-            std::istringstream iss(line);
-            char ch; int u, v;
-            iss >> ch >> u >> v;
-            G.addEdge(u - 1, v - 1);
-        }
-    }
-    return G;
-}
-
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <dimacs_file>\n";
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <num_vertices> <density_percent>\n"
+                  << "  e.g. " << argv[0] << " 100 50\n";
         return 1;
     }
 
-    Graph G = readDIMACS(argv[1]);
-    int n = G.n;
+    int n = std::stoi(argv[1]);
+    int densityPct = std::stoi(argv[2]);
 
     if (n > MAX_N) {
         std::cerr << "n=" << n << " exceeds MAX_N=" << MAX_N << "\n";
         return 1;
     }
 
+    // Generate random graph
+    std::mt19937 rng(42);
+    std::uniform_int_distribution<int> pctDist(0, 99);
+
+    std::vector<std::vector<bool>> adj(n, std::vector<bool>(n, false));
+    std::vector<int> deg(n, 0);
+    int m = 0;
+    for (int u = 0; u < n; ++u)
+        for (int v = u + 1; v < n; ++v)
+            if (pctDist(rng) < densityPct) {
+                adj[u][v] = adj[v][u] = true;
+                ++deg[u]; ++deg[v]; ++m;
+            }
+
     std::vector<int> order(n);
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(),
-              [&](int a, int b) { return G.deg[a] > G.deg[b]; });
+              [&](int a, int b) { return deg[a] > deg[b]; });
 
     int wordsPerRow = (n + 31) / 32;
     std::vector<uint32_t> adjBits(n * wordsPerRow, 0u);
     for (int u = 0; u < n; ++u)
         for (int v = 0; v < n; ++v)
-            if (G.adj[u][v])
+            if (adj[u][v])
                 adjBits[u * wordsPerRow + v / 32] |= (1u << (v % 32));
 
     uint32_t *d_adj;
@@ -230,6 +191,12 @@ int main(int argc, char* argv[]) {
     int blockSize = 128;
     int gridSize = (n + blockSize - 1) / blockSize;
 
+    std::cout << "═══════════════════════════════════════════════════════\n"
+              << " GPU-Optimized Max Clique (Iterative BK + bitmask)\n"
+              << "═══════════════════════════════════════════════════════\n"
+              << " Instance    : random n=" << n << " density=" << densityPct << "% (seed=42)\n"
+              << " Vertices    : " << n << "   Edges: " << m << "\n";
+
     auto t0 = std::chrono::high_resolution_clock::now();
 
     clique_kernel<<<gridSize, blockSize>>>(
@@ -243,17 +210,12 @@ int main(int argc, char* argv[]) {
     int bestSize = 0;
     CUDA_CHECK(cudaMemcpy(&bestSize, d_bestSize, sizeof(int), cudaMemcpyDeviceToHost));
 
-    std::cout << "═══════════════════════════════════════════════════════\n"
-              << " GPU-Optimized Max Clique (Iterative BK + bitmask)\n"
-              << "═══════════════════════════════════════════════════════\n"
-              << " Instance    : " << argv[1] << "\n"
-              << " Vertices    : " << n << "   Edges: " << G.m << "\n"
-              << " Clique size : " << bestSize << "\n"
+    std::cout << " Clique size : " << bestSize << "\n"
               << std::setprecision(6)
               << " Time        : " << elapsed << " s\n"
               << "═══════════════════════════════════════════════════════\n";
 
-    std::cout << "CSV," << n << "," << G.m << ","
+    std::cout << "CSV," << n << "," << m << ","
               << bestSize << "," << elapsed << "\n";
 
     cudaFree(d_adj); cudaFree(d_order);
