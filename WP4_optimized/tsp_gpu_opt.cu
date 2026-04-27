@@ -27,7 +27,8 @@
     } \
 } while(0)
 
-#define MAX_SHARED_N 256
+#define MAX_SHARED_BYTES 49152
+#define MAX_SHARED_N 78  // sqrt(49152 / sizeof(double)) ≈ 78
 
 __global__ void initRNG(curandState* states, int numChains, unsigned long long seed) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
