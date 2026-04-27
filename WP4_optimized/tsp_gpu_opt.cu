@@ -1,10 +1,29 @@
 /**
  * WP4 – GPU-Optimized TSP
  * ========================
- * Algorithm: Massively Parallel SA with shared memory distance matrix caching
+ * Algorithm: Ant Colony Optimization (ACO)
+ *
+ * Why ACO is GPU-optimal (vs SA on CPU):
+ *   - Each ant builds a tour INDEPENDENTLY → embarrassingly parallel
+ *   - Tour construction: probabilistic city selection → GPU RNG excels
+ *   - Pheromone matrix: shared read-mostly structure → GPU L2 cache
+ *   - Pheromone update: atomicAdd on global matrix → native GPU op
+ *   - No complex branching (unlike Or-opt) → no warp divergence
+ *
+ * Why SA is CPU-optimal (vs ACO on GPU):
+ *   - SA benefits from deep sequential local search (2-opt, Or-opt)
+ *   - Complex move evaluation with branch prediction
+ *   - Few threads, long chains → CPU excels
+ *
+ * Parameters:
+ *   - numAnts: number of ants per iteration (= GPU threads)
+ *   - numIters: number of ACO iterations (pheromone updates)
+ *   - alpha: pheromone importance
+ *   - beta: heuristic (1/distance) importance
+ *   - rho: evaporation rate
  *
  * Build: nvcc -O3 -std=c++14 -arch=sm_75 -o tsp_gpu_opt tsp_gpu_opt.cu
- * Run:   ./tsp_gpu_opt <num_cities> [max_iter] [init_temp] [num_chains]
+ * Run:   ./tsp_gpu_opt <num_cities> [num_iters] [num_ants]
  */
 
 #include <iostream>
@@ -27,109 +46,150 @@
     } \
 } while(0)
 
-#define MAX_SHARED_BYTES 49152
-#define MAX_SHARED_N 78  // sqrt(49152 / sizeof(double)) ≈ 78
-
-__global__ void initRNG(curandState* states, int numChains, unsigned long long seed) {
+__global__ void initRNG(curandState* states, int numAnts, unsigned long long seed) {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= numChains) return;
+    if (tid >= numAnts) return;
     curand_init(seed, tid, 0, &states[tid]);
 }
 
-__global__ void saKernel_Optimized(
+/**
+ * Each ant constructs a tour using probabilistic city selection
+ * based on pheromone levels and heuristic information (1/distance).
+ */
+__global__ void antTourKernel(
     const double* __restrict__ distMat,
-    int n, long long maxIter, double initTemp, double coolRate,
-    curandState* states, double* bestCosts, int* bestTours, int numChains,
-    bool useShared)
+    const double* __restrict__ pheromone,
+    int n, double alpha, double beta,
+    curandState* states, int* tours, double* tourCosts,
+    int numAnts)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (tid >= numChains) return;
-
-    extern __shared__ double sharedDist[];
-
-    if (useShared && n <= MAX_SHARED_N) {
-        int totalElems = n * n;
-        int threadsInBlock = blockDim.x;
-        for (int idx = threadIdx.x; idx < totalElems; idx += threadsInBlock)
-            sharedDist[idx] = distMat[idx];
-        __syncthreads();
-    }
-
-    const double* dist = (useShared && n <= MAX_SHARED_N) ? sharedDist : distMat;
+    if (tid >= numAnts) return;
 
     curandState localState = states[tid];
-    int* tour = bestTours + (long long)tid * n;
+    int* tour = tours + (long long)tid * n;
 
-    int startCity = tid % n;
-    for (int i = 0; i < n; ++i) tour[i] = i;
-    tour[startCity] = 0;
+    // Each ant starts from a random city
+    int startCity = curand(&localState) % n;
+
+    // visited bitmask (up to 1024 cities with 32 words)
+    unsigned int visited[32];
+    int words = (n + 31) / 32;
+    for (int w = 0; w < words; ++w) visited[w] = 0;
+
     tour[0] = startCity;
+    visited[startCity / 32] |= (1u << (startCity % 32));
 
-    for (int step = 0; step < n - 1; ++step) {
-        int curr = tour[step];
-        double bestD = 1e30;
-        int bestIdx = step + 1;
-        for (int j = step + 1; j < n; ++j) {
-            double d = dist[curr * n + tour[j]];
-            if (d < bestD) { bestD = d; bestIdx = j; }
+    for (int step = 1; step < n; ++step) {
+        int curr = tour[step - 1];
+
+        // Calculate selection probabilities
+        double totalProb = 0.0;
+        double probs[1024];
+
+        for (int j = 0; j < n; ++j) {
+            if ((visited[j / 32] >> (j % 32)) & 1u) {
+                probs[j] = 0.0;
+                continue;
+            }
+            double dist = distMat[curr * n + j];
+            if (dist < 1e-10) dist = 1e-10;
+            double tau = pheromone[curr * n + j];
+            double eta = 1.0 / dist;
+
+            double p = pow(tau, alpha) * pow(eta, beta);
+            probs[j] = p;
+            totalProb += p;
         }
-        int tmp = tour[step + 1];
-        tour[step + 1] = tour[bestIdx];
-        tour[bestIdx] = tmp;
+
+        // Roulette wheel selection
+        double r = curand_uniform_double(&localState) * totalProb;
+        double cumulative = 0.0;
+        int nextCity = -1;
+
+        for (int j = 0; j < n; ++j) {
+            cumulative += probs[j];
+            if (cumulative >= r) {
+                nextCity = j;
+                break;
+            }
+        }
+
+        // Fallback: pick first unvisited
+        if (nextCity < 0) {
+            for (int j = 0; j < n; ++j)
+                if (!((visited[j / 32] >> (j % 32)) & 1u)) { nextCity = j; break; }
+        }
+
+        tour[step] = nextCity;
+        visited[nextCity / 32] |= (1u << (nextCity % 32));
     }
 
+    // Compute tour cost
     double cost = 0.0;
     for (int i = 0; i < n; ++i)
-        cost += dist[tour[i] * n + tour[(i + 1) % n]];
+        cost += distMat[tour[i] * n + tour[(i + 1) % n]];
 
-    double bestCost = cost;
-    double T = initTemp;
-
-    for (long long iter = 0; iter < maxIter && T > 1e-10; ++iter) {
-        int i = curand(&localState) % n;
-        int j = curand(&localState) % n;
-        if (i == j) continue;
-        if (i > j) { int tmp = i; i = j; j = tmp; }
-        if (j - i < 2 || (i == 0 && j == n - 1)) continue;
-
-        int a = tour[i], b = tour[i+1], c = tour[j], d = tour[(j+1)%n];
-        double delta = dist[a*n+c] + dist[b*n+d] - dist[a*n+b] - dist[c*n+d];
-
-        if (delta < 0.0 || curand_uniform_double(&localState) < exp(-delta / T)) {
-            int left = i + 1, right = j;
-            while (left < right) {
-                int tmp = tour[left]; tour[left] = tour[right]; tour[right] = tmp;
-                ++left; --right;
-            }
-            cost += delta;
-            if (cost < bestCost) bestCost = cost;
-        }
-        T *= coolRate;
-    }
-
-    bestCosts[tid] = bestCost;
+    tourCosts[tid] = cost;
     states[tid] = localState;
+}
+
+/**
+ * Pheromone evaporation: tau[i][j] *= (1 - rho)
+ */
+__global__ void evaporateKernel(double* pheromone, int n, double evapFactor) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n * n) return;
+    pheromone[idx] *= evapFactor;
+    if (pheromone[idx] < 1e-10) pheromone[idx] = 1e-10;
+}
+
+/**
+ * Pheromone deposit: for each ant's tour, add Q/cost to edges
+ */
+__global__ void depositKernel(
+    double* pheromone, const int* tours, const double* tourCosts,
+    int n, int numAnts, double Q)
+{
+    int antId = blockIdx.x * blockDim.x + threadIdx.x;
+    if (antId >= numAnts) return;
+
+    double cost = tourCosts[antId];
+    double deposit = Q / cost;
+    const int* tour = tours + (long long)antId * n;
+
+    for (int i = 0; i < n; ++i) {
+        int from = tour[i], to = tour[(i + 1) % n];
+        atomicAdd(&pheromone[from * n + to], deposit);
+        atomicAdd(&pheromone[to * n + from], deposit);
+    }
 }
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <num_cities> [max_iter] [init_temp] [num_chains]\n";
+        std::cerr << "Usage: " << argv[0] << " <num_cities> [num_iters] [num_ants]\n";
         return 1;
     }
 
     int n = std::stoi(argv[1]);
-    long long totalIter = (argc > 2) ? std::stoll(argv[2]) : (long long)n * n * 100;
-    double initTemp = (argc > 3) ? std::stod(argv[3]) : 1000.0;
-    int numChains = (argc > 4) ? std::stoi(argv[4]) : 2048;
+    int numIters = (argc > 2) ? std::stoi(argv[2]) : 100;
+    int numAnts = (argc > 3) ? std::stoi(argv[3]) : 1024;
+
+    double alpha = 1.0;   // pheromone importance
+    double beta = 3.0;    // heuristic importance
+    double rho = 0.1;     // evaporation rate
+    double Q = 1000.0;    // deposit constant
+
+    if (n > 1024) {
+        std::cerr << "n=" << n << " exceeds max 1024 for ACO visited bitmask\n";
+        return 1;
+    }
 
     // Generate random cities
     std::mt19937 rng(42);
     std::uniform_real_distribution<double> coordDist(0.0, 1000.0);
     std::vector<double> cx(n), cy(n);
     for (int i = 0; i < n; ++i) { cx[i] = coordDist(rng); cy[i] = coordDist(rng); }
-
-    long long itersPerChain = std::max(1LL, totalIter / numChains);
-    double coolRate = std::exp(std::log(1e-9 / initTemp) / (double)itersPerChain);
 
     std::vector<double> hostDist(n * n, 0.0);
     for (int i = 0; i < n; ++i)
@@ -154,63 +214,81 @@ int main(int argc, char* argv[]) {
         nnCost += hostDist[curr * n + 0];
     }
 
-    std::cout << std::fixed << std::setprecision(2);
-    std::cout << "═══════════════════════════════════════════════════════\n"
-              << " GPU-Optimized TSP (SA + shared mem, " << numChains << " chains)\n"
-              << "═══════════════════════════════════════════════════════\n"
-              << " Instance       : random " << n << " cities (seed=42)\n"
-              << " Iters/chain    : " << itersPerChain << "\n"
-              << " NN cost        : " << nnCost << "\n";
+    // Initialize pheromone matrix
+    double tau0 = 1.0 / (n * nnCost);
+    std::vector<double> hostPheromone(n * n, tau0);
 
-    double *d_dist, *d_bestCosts;
+    double *d_dist, *d_pheromone, *d_tourCosts;
     curandState *d_states;
-    int *d_bestTours;
+    int *d_tours;
 
     CUDA_CHECK(cudaMalloc(&d_dist, sizeof(double) * n * n));
-    CUDA_CHECK(cudaMalloc(&d_states, sizeof(curandState) * numChains));
-    CUDA_CHECK(cudaMalloc(&d_bestCosts, sizeof(double) * numChains));
-    CUDA_CHECK(cudaMalloc(&d_bestTours, sizeof(int) * (long long)numChains * n));
+    CUDA_CHECK(cudaMalloc(&d_pheromone, sizeof(double) * n * n));
+    CUDA_CHECK(cudaMalloc(&d_states, sizeof(curandState) * numAnts));
+    CUDA_CHECK(cudaMalloc(&d_tours, sizeof(int) * (long long)numAnts * n));
+    CUDA_CHECK(cudaMalloc(&d_tourCosts, sizeof(double) * numAnts));
+
     CUDA_CHECK(cudaMemcpy(d_dist, hostDist.data(), sizeof(double)*n*n, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_pheromone, hostPheromone.data(), sizeof(double)*n*n, cudaMemcpyHostToDevice));
 
-    int blockSize = 128;
-    int gridSize = (numChains + blockSize - 1) / blockSize;
+    int antBlock = 128;
+    int antGrid = (numAnts + antBlock - 1) / antBlock;
+    int phBlock = 256;
+    int phGrid = (n * n + phBlock - 1) / phBlock;
 
-    initRNG<<<gridSize, blockSize>>>(d_states, numChains, 42ULL);
+    initRNG<<<antGrid, antBlock>>>(d_states, numAnts, 42ULL);
     CUDA_CHECK(cudaGetLastError());
 
-    bool useShared = (n <= MAX_SHARED_N);
-    size_t sharedMem = useShared ? sizeof(double) * n * n : 0;
+    std::cout << std::fixed << std::setprecision(2);
+    std::cout << "═══════════════════════════════════════════════════════\n"
+              << " GPU-Optimized TSP (ACO, " << numAnts << " ants, " << numIters << " iters)\n"
+              << "═══════════════════════════════════════════════════════\n"
+              << " Instance       : random " << n << " cities (seed=42)\n"
+              << " NN cost        : " << nnCost << "\n";
+
+    double globalBestCost = 1e30;
+    std::vector<double> hostTourCosts(numAnts);
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    saKernel_Optimized<<<gridSize, blockSize, sharedMem>>>(
-        d_dist, n, itersPerChain, initTemp, coolRate,
-        d_states, d_bestCosts, d_bestTours, numChains, useShared);
+    for (int iter = 0; iter < numIters; ++iter) {
+        // 1. Each ant builds a tour
+        antTourKernel<<<antGrid, antBlock>>>(
+            d_dist, d_pheromone, n, alpha, beta,
+            d_states, d_tours, d_tourCosts, numAnts);
+
+        // 2. Evaporate pheromones
+        evaporateKernel<<<phGrid, phBlock>>>(d_pheromone, n, 1.0 - rho);
+
+        // 3. Deposit pheromones
+        depositKernel<<<antGrid, antBlock>>>(
+            d_pheromone, d_tours, d_tourCosts, n, numAnts, Q);
+    }
+
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
     auto t1 = std::chrono::high_resolution_clock::now();
     double elapsed = std::chrono::duration<double>(t1 - t0).count();
 
-    std::vector<double> hostBestCosts(numChains);
-    CUDA_CHECK(cudaMemcpy(hostBestCosts.data(), d_bestCosts, sizeof(double)*numChains, cudaMemcpyDeviceToHost));
+    // Find best tour across all ants in last iteration
+    CUDA_CHECK(cudaMemcpy(hostTourCosts.data(), d_tourCosts, sizeof(double)*numAnts, cudaMemcpyDeviceToHost));
 
-    double bestCost = hostBestCosts[0];
-    int bestChain = 0;
-    for (int i = 1; i < numChains; ++i)
-        if (hostBestCosts[i] < bestCost) { bestCost = hostBestCosts[i]; bestChain = i; }
+    double bestCost = hostTourCosts[0];
+    int bestAnt = 0;
+    for (int i = 1; i < numAnts; ++i)
+        if (hostTourCosts[i] < bestCost) { bestCost = hostTourCosts[i]; bestAnt = i; }
 
     std::cout << " Best tour cost : " << bestCost << "\n"
-              << " Best chain     : " << bestChain << "\n"
+              << " Best ant       : " << bestAnt << "\n"
               << std::setprecision(6)
               << " Execution time : " << elapsed << " s\n"
-              << (useShared ? " [Shared memory: ON]\n" : " [Shared memory: OFF (n>256)]\n")
               << "═══════════════════════════════════════════════════════\n";
 
-    std::cout << "CSV," << n << "," << numChains << ","
+    std::cout << "CSV," << n << "," << numAnts << ","
               << std::setprecision(4) << bestCost << "," << elapsed << "\n";
 
-    cudaFree(d_dist); cudaFree(d_states);
-    cudaFree(d_bestCosts); cudaFree(d_bestTours);
+    cudaFree(d_dist); cudaFree(d_pheromone); cudaFree(d_states);
+    cudaFree(d_tours); cudaFree(d_tourCosts);
     return 0;
 }

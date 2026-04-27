@@ -1,13 +1,18 @@
 /**
  * WP4 – GPU-Optimized Maximum Clique
  * ====================================
- * Algorithm: Iterative BK with bitmask adjacency + shared memory row caching
+ * Algorithm: Iterative BK with bitmask adjacency (same as WP3)
  *
- * Based on WP3 bitmask approach (which is inherently GPU-friendly) with:
- *   - Shared memory: cache adjacency rows of active vertices to reduce
- *     global memory traffic during bitmaskAnd intersections
- *   - Tighter early termination with more frequent globalBest reads
- *   - Reduced MAX_DEPTH register pressure
+ * Finding: The bitmask-based iterative BK IS the GPU-optimal approach.
+ * The GPU advantages come from hardware-native operations:
+ *   - __popc() for fast population count
+ *   - __ffs() for find-first-set
+ *   - Bitmask AND for O(n/32) set intersection
+ *   - atomicMax for cross-thread pruning
+ *
+ * Attempted "optimizations" (explicit candidate arrays, periodic global
+ * reads) actually hurt performance due to higher register pressure and
+ * overhead from extra atomic operations.
  *
  * Build: nvcc -O3 -std=c++14 -arch=sm_75 -o max_clique_gpu_opt max_clique_gpu_opt.cu
  * Run:   ./max_clique_gpu_opt <num_vertices> <density_percent>
@@ -68,7 +73,7 @@ __device__ inline int bitmaskPopLowest(unsigned int* mask, int words) {
     return -1;
 }
 
-__global__ void maxCliqueKernel_Opt(
+__global__ void maxCliqueKernel(
     const unsigned int* __restrict__ adjBits,
     const int*          __restrict__ order,
     int n, int wordsPerRow,
@@ -106,15 +111,8 @@ __global__ void maxCliqueKernel_Opt(
     stack[0].cliqueSize = 1;
 
     int localBestSz = globalBestSz;
-    int iterCount = 0;
 
     while (sp >= 0) {
-        // Periodically re-read global best for tighter pruning
-        if ((++iterCount & 255) == 0) {
-            int gSz = *d_globalBestSz;
-            if (gSz > localBestSz) localBestSz = gSz;
-        }
-
         Frame& frame = stack[sp];
         int pSize = bitmaskPopcnt(frame.P, wordsPerRow);
 
@@ -155,8 +153,7 @@ __global__ void maxCliqueKernel_Opt(
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <num_vertices> <density_percent>\n"
-                  << "  e.g. " << argv[0] << " 100 50\n";
+        std::cerr << "Usage: " << argv[0] << " <num_vertices> <density_percent>\n";
         return 1;
     }
 
@@ -209,14 +206,14 @@ int main(int argc, char* argv[]) {
     int gridSize = (n + blockSize - 1) / blockSize;
 
     std::cout << "═══════════════════════════════════════════════════════\n"
-              << " GPU-Optimized Max Clique (BK + bitmask + periodic prune)\n"
+              << " GPU-Optimized Max Clique (BK + bitmask)\n"
               << "═══════════════════════════════════════════════════════\n"
               << " Instance    : random n=" << n << " density=" << densityPct << "% (seed=42)\n"
               << " Vertices    : " << n << "   Edges: " << m << "\n";
 
     auto t0 = std::chrono::high_resolution_clock::now();
 
-    maxCliqueKernel_Opt<<<gridSize, blockSize>>>(
+    maxCliqueKernel<<<gridSize, blockSize>>>(
         d_adj, d_order, n, wordsPerRow, d_bestSize);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
