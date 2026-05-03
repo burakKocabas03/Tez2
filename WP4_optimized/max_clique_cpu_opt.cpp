@@ -1,19 +1,3 @@
-/**
- * WP4 – CPU-Optimized Maximum Clique
- * ====================================
- * Algorithm: BK + Greedy Coloring Upper Bound + Pivot Selection
- *
- * Improvements over WP1/WP2:
- *   - Greedy coloring bound: assigns colors to candidates, the number of
- *     distinct colors is a tighter upper bound than |P| for the clique size
- *   - Pivot selection via bitmask AND + popcount (O(words) per vertex)
- *   - vector<char> instead of vector<bool> for coloring
- *   - O(1) vertex removal via swap+pop_back
- *
- * Build: g++ -O3 -std=c++17 -fopenmp -o max_clique_cpu_opt max_clique_cpu_opt.cpp
- * Run:   ./max_clique_cpu_opt <num_vertices> <density_percent> [num_threads]
- */
-
 #include <iostream>
 #include <vector>
 #include <algorithm>
@@ -53,13 +37,13 @@ struct Graph {
 
 static inline int popcount64(uint64_t x) { return __builtin_popcountll(x); }
 
-Graph generateRandomGraph(int n, int densityPct, unsigned seed = 42) {
+Graph generateRandomGraph(int n, double density, unsigned seed = 42) {
     Graph G(n);
     std::mt19937 rng(seed);
-    std::uniform_int_distribution<int> pctDist(0, 99);
+    std::uniform_real_distribution<double> dist(0.0, 1.0);
     for (int u = 0; u < n; ++u)
         for (int v = u + 1; v < n; ++v)
-            if (pctDist(rng) < densityPct)
+            if (dist(rng) < density)
                 G.addEdge(u, v);
     return G;
 }
@@ -169,13 +153,13 @@ static void bk_opt(const Graph& G,
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <num_vertices> <density_percent> [num_threads]\n";
+        std::cerr << "Usage: " << argv[0] << " <num_vertices> <density> [num_threads]\n";
         return 1;
     }
 
     int nVert = std::stoi(argv[1]);
-    int densityPct = std::stoi(argv[2]);
-    Graph G = generateRandomGraph(nVert, densityPct);
+    double density = std::stod(argv[2]);
+    Graph G = generateRandomGraph(nVert, density);
     int numThreads = (argc > 3) ? std::stoi(argv[3]) : omp_get_max_threads();
     omp_set_num_threads(numThreads);
 
@@ -239,8 +223,8 @@ int main(int argc, char* argv[]) {
     std::cout << "═══════════════════════════════════════════════════════\n"
               << " CPU-Optimized Max Clique (BK + Coloring + Pivot)\n"
               << "═══════════════════════════════════════════════════════\n"
-              << " Instance    : random n=" << G.n << " density=" << densityPct << "% (seed=42)\n"
-              << " Vertices    : " << G.n << "   Edges: " << G.m << "\n"
+              << " Instance    : random n=" << G.n << " density=" << density << " (seed=42)\n"
+              << " Vertices    : " << G.n << "    Edges: " << G.m << "\n"
               << " Threads     : " << numThreads << "\n"
               << " Clique size : " << globalBest.size() << "\n"
               << " Nodes       : " << totalNodes << "\n"
