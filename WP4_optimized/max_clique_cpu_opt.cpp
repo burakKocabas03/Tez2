@@ -6,30 +6,23 @@
  * Improvements over WP1/WP2:
  *   - Greedy coloring bound: assigns colors to candidates, the number of
  *     distinct colors is a tighter upper bound than |P| for the clique size
- *   - Pivot selection: choose the vertex in P with maximum connections to
- *     other candidates, reducing the number of recursive branches
- *   - Bitset adjacency: std::vector<uint64_t> bitmask for fast set operations
- *
- * CPU advantages exploited:
- *   - Deep recursion with complex branching → CPU branch predictor excels
- *   - Coloring requires sequential greedy assignment → inherently serial
- *   - Large L2/L3 cache holds adjacency matrix for moderate graphs
+ *   - Pivot selection via bitmask AND + popcount (O(words) per vertex)
+ *   - vector<char> instead of vector<bool> for coloring
+ *   - O(1) vertex removal via swap+pop_back
  *
  * Build: g++ -O3 -std=c++17 -fopenmp -o max_clique_cpu_opt max_clique_cpu_opt.cpp
- * Run:   ./max_clique_cpu_opt <dimacs_file> [num_threads]
+ * Run:   ./max_clique_cpu_opt <num_vertices> <density_percent> [num_threads]
  */
 
 #include <iostream>
 #include <vector>
 #include <algorithm>
 #include <chrono>
-#include <fstream>
-#include <sstream>
 #include <string>
 #include <iomanip>
 #include <numeric>
 #include <atomic>
-#include <cstring>
+#include <random>
 #include <omp.h>
 
 static constexpr int WORD_BITS = 64;
@@ -60,31 +53,45 @@ struct Graph {
 
 static inline int popcount64(uint64_t x) { return __builtin_popcountll(x); }
 
-// Greedy coloring: returns color count (upper bound on clique size in P)
+Graph generateRandomGraph(int n, int densityPct, unsigned seed = 42) {
+    Graph G(n);
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> pctDist(0, 99);
+    for (int u = 0; u < n; ++u)
+        for (int v = u + 1; v < n; ++v)
+            if (pctDist(rng) < densityPct)
+                G.addEdge(u, v);
+    return G;
+}
+
 int greedyColoring(const Graph& G, const std::vector<int>& P,
                    std::vector<int>& colorOrder) {
     int np = (int)P.size();
     std::vector<int> color(np, 0);
     int maxColor = 0;
 
+    std::vector<char> usedColors(np + 2, 0);
+
     for (int i = 0; i < np; ++i) {
-        // Find smallest color not used by already-colored neighbors in P
-        std::vector<bool> usedColors(np + 1, false);
         for (int j = 0; j < i; ++j) {
             if (G.adjacent(P[i], P[j]))
-                usedColors[color[j]] = true;
+                usedColors[color[j]] = 1;
         }
         int c = 1;
         while (usedColors[c]) ++c;
         color[i] = c;
         if (c > maxColor) maxColor = c;
+
+        for (int j = 0; j < i; ++j) {
+            if (G.adjacent(P[i], P[j]))
+                usedColors[color[j]] = 0;
+        }
     }
 
-    // Reorder: vertices with higher colors first (they form tighter bounds)
     std::vector<std::pair<int,int>> colorVertex(np);
     for (int i = 0; i < np; ++i)
         colorVertex[i] = {color[i], P[i]};
-    std::sort(colorVertex.begin(), colorVertex.end());
+    std::sort(colorVertex.rbegin(), colorVertex.rend());
 
     colorOrder.resize(np);
     for (int i = 0; i < np; ++i)
@@ -93,13 +100,18 @@ int greedyColoring(const Graph& G, const std::vector<int>& P,
     return maxColor;
 }
 
-// Pivot: select vertex in P with most connections to other P vertices
 int selectPivot(const Graph& G, const std::vector<int>& P) {
     int bestV = P[0], bestConn = -1;
+    int words = G.words;
+
+    std::vector<uint64_t> pMask(words, 0ULL);
+    for (int v : P)
+        pMask[v / WORD_BITS] |= (1ULL << (v % WORD_BITS));
+
     for (int v : P) {
         int conn = 0;
-        for (int u : P)
-            if (u != v && G.adjacent(v, u)) ++conn;
+        for (int w = 0; w < words; ++w)
+            conn += popcount64(G.adjBits[v][w] & pMask[w]);
         if (conn > bestConn) { bestConn = conn; bestV = v; }
     }
     return bestV;
@@ -109,7 +121,7 @@ static void bk_opt(const Graph& G,
                    std::vector<int>& clique,
                    std::vector<int>& P,
                    std::vector<int>& best,
-                   int globalBestSz,
+                   const std::atomic<int>& globalBestSz,
                    long long& nodes) {
     ++nodes;
 
@@ -119,25 +131,23 @@ static void bk_opt(const Graph& G,
         return;
     }
 
-    // Coloring-based upper bound
     std::vector<int> colorOrder;
     int colorBound = greedyColoring(G, P, colorOrder);
 
+    int gSz = globalBestSz.load(std::memory_order_relaxed);
     if ((int)clique.size() + colorBound <= (int)best.size()) return;
-    if ((int)clique.size() + colorBound <= globalBestSz) return;
+    if ((int)clique.size() + colorBound <= gSz) return;
 
-    // Pivot-based branching: only branch on vertices NOT adjacent to pivot
     int pivot = selectPivot(G, P);
 
-    for (int idx = (int)colorOrder.size() - 1; idx >= 0; --idx) {
-        int remaining = idx + 1;
+    for (int idx = 0; idx < (int)colorOrder.size(); ++idx) {
+        int remaining = (int)colorOrder.size() - idx;
+        gSz = globalBestSz.load(std::memory_order_relaxed);
         if ((int)clique.size() + remaining <= (int)best.size()) return;
-        if ((int)clique.size() + remaining <= globalBestSz) return;
+        if ((int)clique.size() + remaining <= gSz) return;
 
         int v = colorOrder[idx];
 
-        // Skip vertices adjacent to pivot (they can't extend a maximal clique
-        // that doesn't include pivot -- Bron-Kerbosch optimization)
         if (G.adjacent(v, pivot) && v != pivot) continue;
 
         std::vector<int> newP;
@@ -149,46 +159,24 @@ static void bk_opt(const Graph& G,
         bk_opt(G, clique, newP, best, globalBestSz, nodes);
         clique.pop_back();
 
-        // Remove v from P (it's been fully explored)
-        P.erase(std::find(P.begin(), P.end(), v));
-    }
-}
-
-Graph readDIMACS(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) { std::cerr << "Cannot open " << filename << "\n"; std::exit(1); }
-    int n = 0, m = 0;
-    std::string line;
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == 'c') continue;
-        if (line[0] == 'p') {
-            std::istringstream iss(line);
-            std::string t1, t2;
-            iss >> t1 >> t2 >> n >> m;
-            break;
+        auto it = std::find(P.begin(), P.end(), v);
+        if (it != P.end()) {
+            std::swap(*it, P.back());
+            P.pop_back();
         }
     }
-    Graph G(n);
-    while (std::getline(file, line)) {
-        if (line.empty() || line[0] == 'c') continue;
-        if (line[0] == 'e') {
-            std::istringstream iss(line);
-            char ch; int u, v;
-            iss >> ch >> u >> v;
-            G.addEdge(u - 1, v - 1);
-        }
-    }
-    return G;
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <dimacs_file> [num_threads]\n";
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <num_vertices> <density_percent> [num_threads]\n";
         return 1;
     }
 
-    Graph G = readDIMACS(argv[1]);
-    int numThreads = (argc > 2) ? std::stoi(argv[2]) : omp_get_max_threads();
+    int nVert = std::stoi(argv[1]);
+    int densityPct = std::stoi(argv[2]);
+    Graph G = generateRandomGraph(nVert, densityPct);
+    int numThreads = (argc > 3) ? std::stoi(argv[3]) : omp_get_max_threads();
     omp_set_num_threads(numThreads);
 
     int n = G.n;
@@ -221,7 +209,7 @@ int main(int argc, char* argv[]) {
                 if (G.adjacent(v, order[j])) P.push_back(order[j]);
 
             std::vector<int> clique = {v};
-            bk_opt(G, clique, P, localBest, localBestSz, localNodes);
+            bk_opt(G, clique, P, localBest, globalBestSz, localNodes);
             localBestSz = std::max(localBestSz, (int)localBest.size());
 
             if (localBestSz > globalBestSz.load(std::memory_order_relaxed)) {
@@ -251,7 +239,7 @@ int main(int argc, char* argv[]) {
     std::cout << "═══════════════════════════════════════════════════════\n"
               << " CPU-Optimized Max Clique (BK + Coloring + Pivot)\n"
               << "═══════════════════════════════════════════════════════\n"
-              << " Instance    : " << argv[1] << "\n"
+              << " Instance    : random n=" << G.n << " density=" << densityPct << "% (seed=42)\n"
               << " Vertices    : " << G.n << "   Edges: " << G.m << "\n"
               << " Threads     : " << numThreads << "\n"
               << " Clique size : " << globalBest.size() << "\n"

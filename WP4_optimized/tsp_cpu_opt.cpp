@@ -1,21 +1,16 @@
 /**
  * WP4 – CPU-Optimized TSP
  * ========================
- * Algorithm: Simulated Annealing + 2-opt + Or-opt (segment relocation)
+ * Algorithm: Simulated Annealing + 2-opt + 3-opt (in-place segment reverse)
  *
- * Improvement over WP1/WP2:
- *   - Or-opt moves: relocate segments of 1, 2, or 3 cities to better positions
- *   - Mixed neighbourhood: 70% 2-opt, 30% Or-opt moves
- *   - Single-row reverse NN for faster initial tour
- *   - Cache-friendly flat distance matrix (same as before)
- *
- * Or-opt is better suited for CPU because:
- *   - Complex branching logic (segment size selection)
- *   - Irregular memory access patterns
- *   - Benefits from branch prediction + large L1/L2 cache
+ * CPU advantages exploited:
+ *   - 3-opt provides deeper local search per iteration
+ *   - Branch prediction handles complex move selection
+ *   - Large L1/L2 cache holds flat distance matrix
+ *   - Multi-start via OpenMP island model
  *
  * Build: g++ -O3 -std=c++17 -fopenmp -o tsp_cpu_opt tsp_cpu_opt.cpp
- * Run:   ./tsp_cpu_opt <tsp_file> [max_iter] [init_temp] [num_threads]
+ * Run:   ./tsp_cpu_opt <num_cities> [max_iter] [init_temp] [num_threads]
  */
 
 #include <iostream>
@@ -24,31 +19,15 @@
 #include <random>
 #include <algorithm>
 #include <chrono>
-#include <fstream>
-#include <sstream>
 #include <iomanip>
 #include <limits>
-#include <string>
-#include <numeric>
 #include <omp.h>
-
-struct City { int id; double x, y; };
 
 struct DistMatrix {
     int n = 0;
     std::vector<double> data;
     explicit DistMatrix(int n_) : n(n_), data((size_t)n_ * n_, 0.0) {}
     inline double get(int i, int j) const { return data[i * n + j]; }
-    void build(const std::vector<City>& cities) {
-        for (int i = 0; i < n; ++i)
-            for (int j = i + 1; j < n; ++j) {
-                double dx = cities[i].x - cities[j].x;
-                double dy = cities[i].y - cities[j].y;
-                double d = std::sqrt(dx * dx + dy * dy);
-                data[i * n + j] = d;
-                data[j * n + i] = d;
-            }
-    }
 };
 
 double tourCost(const std::vector<int>& tour, const DistMatrix& dm) {
@@ -87,14 +66,13 @@ struct SAResult {
     double bestCost;
 };
 
-SAResult runSA_OrOpt(const DistMatrix& dm, double initTemp, double coolRate,
-                     long long maxIter, int startCity, unsigned seed) {
+SAResult runSA_3opt(const DistMatrix& dm, double initTemp, double coolRate,
+                    long long maxIter, int startCity, unsigned seed) {
     const int n = dm.n;
     std::mt19937 rng(seed);
     std::uniform_int_distribution<int> cityDist(0, n - 1);
     std::uniform_real_distribution<double> probDist(0.0, 1.0);
     std::uniform_int_distribution<int> moveDist(0, 9);
-    std::uniform_int_distribution<int> segDist(1, 3);
 
     auto tour = nearestNeighbourTour(dm, startCity);
     double cost = tourCost(tour, dm);
@@ -106,14 +84,14 @@ SAResult runSA_OrOpt(const DistMatrix& dm, double initTemp, double coolRate,
         int moveType = moveDist(rng);
 
         if (moveType < 7) {
-            // 2-opt move (70% of the time)
+            // 2-opt (70%): reverse segment [i+1..j]
             int i = cityDist(rng), j = cityDist(rng);
-            if (i == j) continue;
+            if (i == j) { T *= coolRate; continue; }
             if (i > j) std::swap(i, j);
-            if (j - i < 2 || (i == 0 && j == n - 1)) continue;
+            if (j - i < 2 || (i == 0 && j == n - 1)) { T *= coolRate; continue; }
 
-            int a = tour[i], b = tour[i+1], c = tour[j], d = tour[(j+1)%n];
-            double delta = dm.get(a,c) + dm.get(b,d) - dm.get(a,b) - dm.get(c,d);
+            double delta = dm.get(tour[i], tour[j]) + dm.get(tour[i+1], tour[(j+1)%n])
+                         - dm.get(tour[i], tour[i+1]) - dm.get(tour[j], tour[(j+1)%n]);
 
             if (delta < 0.0 || probDist(rng) < std::exp(-delta / T)) {
                 std::reverse(tour.begin() + i + 1, tour.begin() + j + 1);
@@ -121,67 +99,44 @@ SAResult runSA_OrOpt(const DistMatrix& dm, double initTemp, double coolRate,
                 if (cost < bestCost) { bestCost = cost; bestTour = tour; }
             }
         } else {
-            // Or-opt move (30%): relocate segment of 1-3 cities
-            int segLen = segDist(rng);
-            if (segLen >= n - 1) continue;
-            int pos = cityDist(rng);
-            int insertAt = cityDist(rng);
-            if (insertAt == pos || std::abs(insertAt - pos) <= segLen) continue;
+            // 3-opt (30%): pick 3 random cut points, try best reconnection
+            int a = cityDist(rng), b = cityDist(rng), c = cityDist(rng);
+            // Sort so a < b < c
+            if (a > b) std::swap(a, b);
+            if (b > c) std::swap(b, c);
+            if (a > b) std::swap(a, b);
+            if (b - a < 2 || c - b < 2 || c >= n - 1) { T *= coolRate; continue; }
 
-            // Compute cost change for removing segment and inserting elsewhere
-            int segEnd = (pos + segLen - 1) % n;
-            int beforeSeg = (pos - 1 + n) % n;
-            int afterSeg = (segEnd + 1) % n;
-            int beforeIns = insertAt;
-            int afterIns = (insertAt + 1) % n;
+            int A1 = tour[a], A2 = tour[a+1];
+            int B1 = tour[b], B2 = tour[b+1];
+            int C1 = tour[c], C2 = tour[(c+1)%n];
 
-            // Ensure we don't overlap
-            if (beforeIns == segEnd || afterIns == pos) continue;
+            double d0 = dm.get(A1,A2) + dm.get(B1,B2) + dm.get(C1,C2);
 
-            double removeCost = dm.get(tour[beforeSeg], tour[pos])
-                              + dm.get(tour[segEnd], tour[afterSeg]);
-            double removeGain = dm.get(tour[beforeSeg], tour[afterSeg]);
-            double insertCost = dm.get(tour[beforeIns], tour[afterIns]);
-            double insertPay  = dm.get(tour[beforeIns], tour[pos])
-                              + dm.get(tour[segEnd], tour[afterIns]);
+            // Try reversal of segment [a+1..b] (2-opt between a and b)
+            double d1 = dm.get(A1,B1) + dm.get(A2,B2) + dm.get(C1,C2);
+            // Try reversal of segment [b+1..c] (2-opt between b and c)
+            double d2 = dm.get(A1,A2) + dm.get(B1,C1) + dm.get(B2,C2);
+            // Try both reversals
+            double d3 = dm.get(A1,B1) + dm.get(A2,C1) + dm.get(B2,C2);
 
-            double delta = -removeCost + removeGain - insertCost + insertPay;
+            double bestDelta = 1e30;
+            int bestMove = -1;
+            if (d1 - d0 < bestDelta) { bestDelta = d1 - d0; bestMove = 1; }
+            if (d2 - d0 < bestDelta) { bestDelta = d2 - d0; bestMove = 2; }
+            if (d3 - d0 < bestDelta) { bestDelta = d3 - d0; bestMove = 3; }
 
-            if (delta < 0.0 || probDist(rng) < std::exp(-delta / T)) {
-                // Extract segment
-                std::vector<int> seg;
-                for (int k = 0; k < segLen; ++k)
-                    seg.push_back(tour[(pos + k) % n]);
-
-                // Remove from tour
-                std::vector<int> newTour;
-                newTour.reserve(n);
-                for (int k = 0; k < n; ++k) {
-                    bool inSeg = false;
-                    for (int s = 0; s < segLen; ++s)
-                        if (k == (pos + s) % n) { inSeg = true; break; }
-                    if (!inSeg) newTour.push_back(tour[k]);
+            if (bestDelta < 0.0 || probDist(rng) < std::exp(-bestDelta / T)) {
+                if (bestMove == 1) {
+                    std::reverse(tour.begin() + a + 1, tour.begin() + b + 1);
+                } else if (bestMove == 2) {
+                    std::reverse(tour.begin() + b + 1, tour.begin() + c + 1);
+                } else if (bestMove == 3) {
+                    std::reverse(tour.begin() + a + 1, tour.begin() + b + 1);
+                    std::reverse(tour.begin() + b + 1, tour.begin() + c + 1);
                 }
-
-                // Find insert position in reduced tour
-                int insIdx = -1;
-                for (int k = 0; k < (int)newTour.size(); ++k)
-                    if (newTour[k] == tour[beforeIns]) { insIdx = k + 1; break; }
-                if (insIdx < 0 || insIdx > (int)newTour.size()) {
-                    continue;
-                }
-
-                newTour.insert(newTour.begin() + insIdx, seg.begin(), seg.end());
-
-                if ((int)newTour.size() == n) {
-                    double newCost = tourCost(newTour, dm);
-                    double realDelta = newCost - cost;
-                    if (realDelta < 0.0 || probDist(rng) < std::exp(-realDelta / T)) {
-                        tour = newTour;
-                        cost = newCost;
-                        if (cost < bestCost) { bestCost = cost; bestTour = tour; }
-                    }
-                }
+                cost = tourCost(tour, dm);
+                if (cost < bestCost) { bestCost = cost; bestTour = tour; }
             }
         }
         T *= coolRate;
@@ -189,43 +144,35 @@ SAResult runSA_OrOpt(const DistMatrix& dm, double initTemp, double coolRate,
     return {bestTour, bestCost};
 }
 
-std::vector<City> readTSPLIB(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) { std::cerr << "Cannot open " << filename << "\n"; std::exit(1); }
-    std::vector<City> cities;
-    std::string line;
-    bool inNodes = false;
-    while (std::getline(file, line)) {
-        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
-        if (line == "NODE_COORD_SECTION") { inNodes = true; continue; }
-        if (line == "EOF") break;
-        if (inNodes && !line.empty()) {
-            std::istringstream iss(line);
-            City c;
-            if (iss >> c.id >> c.x >> c.y) { c.id--; cities.push_back(c); }
-        }
-    }
-    return cities;
-}
-
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <tsp_file> [max_iter] [init_temp] [num_threads]\n";
+        std::cerr << "Usage: " << argv[0] << " <num_cities> [max_iter] [init_temp] [num_threads]\n";
         return 1;
     }
 
-    auto cities = readTSPLIB(argv[1]);
-    int n = (int)cities.size();
+    int n = std::stoi(argv[1]);
     long long maxIter = (argc > 2) ? std::stoll(argv[2]) : (long long)n * n * 10;
     double initTemp = (argc > 3) ? std::stod(argv[3]) : 1000.0;
     int numThreads = (argc > 4) ? std::stoi(argv[4]) : omp_get_max_threads();
     omp_set_num_threads(numThreads);
 
-    long long itersPerThread = maxIter / numThreads;
-    double coolRate = std::exp(std::log(1e-9 / initTemp) / (double)itersPerThread);
+    // Generate random cities
+    std::mt19937 genRng(42);
+    std::uniform_real_distribution<double> coordDist(0.0, 1000.0);
 
     DistMatrix dm(n);
-    dm.build(cities);
+    std::vector<double> cx(n), cy(n);
+    for (int i = 0; i < n; ++i) { cx[i] = coordDist(genRng); cy[i] = coordDist(genRng); }
+    for (int i = 0; i < n; ++i)
+        for (int j = i + 1; j < n; ++j) {
+            double dx = cx[i] - cx[j], dy = cy[i] - cy[j];
+            double d = std::sqrt(dx * dx + dy * dy);
+            dm.data[i * n + j] = d;
+            dm.data[j * n + i] = d;
+        }
+
+    long long itersPerThread = maxIter / numThreads;
+    double coolRate = std::exp(std::log(1e-9 / initTemp) / (double)itersPerThread);
 
     double nnCost = tourCost(nearestNeighbourTour(dm, 0), dm);
 
@@ -240,7 +187,7 @@ int main(int argc, char* argv[]) {
         int startCity = (tid * n) / numThreads;
         unsigned seed = 42u + (unsigned)tid * 1000u;
 
-        auto res = runSA_OrOpt(dm, initTemp, coolRate, itersPerThread, startCity, seed);
+        auto res = runSA_3opt(dm, initTemp, coolRate, itersPerThread, startCity, seed);
 
         #pragma omp critical
         {
@@ -256,9 +203,9 @@ int main(int argc, char* argv[]) {
 
     std::cout << std::fixed << std::setprecision(2);
     std::cout << "═══════════════════════════════════════════════════════\n"
-              << " CPU-Optimized TSP (SA + Or-opt, " << numThreads << " threads)\n"
+              << " CPU-Optimized TSP (SA + 2-opt/3-opt, " << numThreads << " threads)\n"
               << "═══════════════════════════════════════════════════════\n"
-              << " Instance       : " << argv[1] << "  (" << n << " cities)\n"
+              << " Instance       : random " << n << " cities (seed=42)\n"
               << " NN cost        : " << nnCost << "\n"
               << " Best tour cost : " << globalBestCost << "\n"
               << " Improvement    : " << 100.0*(nnCost - globalBestCost)/nnCost << " %\n"

@@ -249,16 +249,16 @@ int main(int argc, char* argv[]) {
     const auto   nnTour = nearestNeighbourTour(dm, 0);
     const double nnCost = tourCost(nnTour, dm);
 
-    // Each thread gets an equal share of the total iteration budget.
-    // Total SA work = maxIter  (same as serial WP1 for a fair speedup comparison).
-    const long long itersPerThread = maxIter / numThreads;
+    // Each thread gets an equal share; last thread absorbs the remainder.
+    const long long itersBase      = maxIter / numThreads;
+    const long long itersRemainder = maxIter % numThreads;
 
     std::cout << "═══════════════════════════════════════════════════════\n";
     std::cout << " WP2 – TSP OpenMP Parallel (Simulated Annealing)\n";
     std::cout << "═══════════════════════════════════════════════════════\n";
     std::cout << " Instance       : random " << n << " cities (seed=42)\n";
     std::cout << " max_iter       : " << maxIter        << "\n";
-    std::cout << " iters/thread   : " << itersPerThread << "\n";
+    std::cout << " iters/thread   : " << itersBase << " (+" << itersRemainder << " remainder)\n";
     std::cout << " init_temp      : " << initTemp       << "\n";
     std::cout << " cooling_rate   : " << coolingRate    << "\n";
     std::cout << " threads        : " << numThreads     << "\n";
@@ -281,7 +281,10 @@ int main(int argc, char* argv[]) {
         const int          startCity = (tid * n) / numThreads;
         const unsigned int seed      = 42u + static_cast<unsigned>(tid) * 1000u;
 
-        ThreadResult res = runSA(dm, initTemp, coolingRate, itersPerThread,
+        // Last thread absorbs remainder iterations
+        const long long myIters = itersBase + ((tid == numThreads - 1) ? itersRemainder : 0);
+
+        ThreadResult res = runSA(dm, initTemp, coolingRate, myIters,
                                  startCity, seed, tid);
 
         // Update global best — only one thread at a time

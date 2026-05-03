@@ -57,15 +57,15 @@
 
 struct Graph {
     int n = 0, m = 0;
-    std::vector<std::vector<bool>> adj;
+    std::vector<std::vector<char>> adj;   // char instead of bool: avoids bit-packed penalty
     std::vector<int>               deg;
 
     explicit Graph(int n_)
-        : n(n_), adj(n_, std::vector<bool>(n_, false)), deg(n_, 0) {}
+        : n(n_), adj(n_, std::vector<char>(n_, 0)), deg(n_, 0) {}
 
     void addEdge(int u, int v) {
         if (!adj[u][v]) {
-            adj[u][v] = adj[v][u] = true;
+            adj[u][v] = adj[v][u] = 1;
             ++deg[u]; ++deg[v];
             ++m;
         }
@@ -79,8 +79,8 @@ struct Graph {
 static void bk(const Graph&             G,
                std::vector<int>&         clique,
                const std::vector<int>&   P,
-               std::vector<int>&         best,     // thread-local best
-               int                       globalBestSz,  // read-only hint for pruning
+               std::vector<int>&         best,
+               const std::atomic<int>&   globalBestSz,
                long long&                nodes)
 {
     ++nodes;
@@ -91,15 +91,15 @@ static void bk(const Graph&             G,
         return;
     }
 
-    // Prune against both thread-local best and global best hint
+    const int gSz = globalBestSz.load(std::memory_order_relaxed);
     const int upperBound = static_cast<int>(clique.size() + P.size());
     if (upperBound <= static_cast<int>(best.size()))   return;
-    if (upperBound <= globalBestSz)                    return;
+    if (upperBound <= gSz)                             return;
 
     for (int i = 0; i < static_cast<int>(P.size()); ++i) {
         const int remaining = static_cast<int>(clique.size()) + static_cast<int>(P.size()) - i;
         if (remaining <= static_cast<int>(best.size()))   return;
-        if (remaining <= globalBestSz)                    return;
+        if (remaining <= globalBestSz.load(std::memory_order_relaxed)) return;
 
         const int v = P[i];
 
@@ -197,7 +197,7 @@ int main(int argc, char* argv[]) {
                     P.push_back(order[j]);
 
             std::vector<int> clique = {v};
-            bk(G, clique, P, localBest, localBestSz, localNodes);
+            bk(G, clique, P, localBest, globalBestSz, localNodes);
             localBestSz = std::max(localBestSz, static_cast<int>(localBest.size()));
 
             // Publish improved result to global best

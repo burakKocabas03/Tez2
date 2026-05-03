@@ -4,11 +4,9 @@
  * Algorithm: Single-row reverse DP (space-optimized, cache-friendly)
  *
  * Improvements over WP1/WP2:
- *   - Single row instead of 2 rows: iterate capacity in reverse (classic trick)
- *     → halves memory, improves cache utilization
- *   - OpenMP parallel over items with inner loop parallelism
- *   - Optional: bitwise-packed DP for ultra-small weight items
- *   - Memory prefetch hints for sequential access pattern
+ *   - Serial: single-row reverse DP → halves memory, improves cache utilization
+ *   - Parallel: two-row forward DP with OpenMP (race-condition-free)
+ *   - Sequential access pattern perfectly suits CPU cache prefetcher
  *
  * CPU advantages exploited:
  *   - Reverse iteration avoids row-swapping and synchronization complexity
@@ -16,87 +14,57 @@
  *   - L1/L2 cache can hold entire DP row for moderate capacities
  *
  * Build: g++ -O3 -std=c++17 -fopenmp -o knapsack_cpu_opt knapsack_cpu_opt.cpp
- * Run:   ./knapsack_cpu_opt <input_file> [num_threads]
+ * Run:   ./knapsack_cpu_opt <num_items> <capacity> [num_threads]
  */
 
 #include <iostream>
 #include <vector>
 #include <algorithm>
 #include <chrono>
-#include <fstream>
-#include <sstream>
 #include <iomanip>
-#include <string>
+#include <random>
 #include <omp.h>
 
 struct KnapsackInstance {
     int n = 0;
-    int W = 0;
+    long long W = 0;
     std::vector<int> weights;
     std::vector<int> values;
 };
 
-KnapsackInstance readInput(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) { std::cerr << "Cannot open " << filename << "\n"; std::exit(1); }
+KnapsackInstance generateRandom(int n, long long W, unsigned seed = 42) {
     KnapsackInstance inst;
-    file >> inst.n >> inst.W;
-    inst.weights.resize(inst.n);
-    inst.values.resize(inst.n);
-    for (int i = 0; i < inst.n; ++i) file >> inst.values[i] >> inst.weights[i];
+    inst.n = n;
+    inst.W = W;
+    inst.weights.resize(n);
+    inst.values.resize(n);
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<int> distW(1, std::max(1LL, W / 10));
+    std::uniform_int_distribution<int> distV(10, 1000);
+    for (int i = 0; i < n; ++i) {
+        inst.weights[i] = distW(rng);
+        inst.values[i] = distV(rng);
+    }
     return inst;
 }
 
 long long solveSingleRow_Serial(const KnapsackInstance& inst) {
-    int n = inst.n, W = inst.W;
+    long long W = inst.W;
+    int n = inst.n;
     std::vector<long long> dp(W + 1, 0);
 
     for (int i = 0; i < n; ++i) {
         int wi = inst.weights[i];
         int vi = inst.values[i];
-        for (int w = W; w >= wi; --w)
+        for (long long w = W; w >= wi; --w)
             dp[w] = std::max(dp[w], dp[w - wi] + vi);
     }
     return dp[W];
 }
 
-long long solveSingleRow_Parallel(const KnapsackInstance& inst, int numThreads) {
-    int n = inst.n, W = inst.W;
-    std::vector<long long> dp(W + 1, 0);
-
-    omp_set_num_threads(numThreads);
-
-    // Anti-dependency-safe parallelism: partition items into groups,
-    // then process each item's reverse scan in parallel using block decomposition
-    for (int i = 0; i < n; ++i) {
-        int wi = inst.weights[i];
-        int vi = inst.values[i];
-
-        // Parallel reverse scan with block partitioning
-        // Each thread processes a contiguous block of the dp array in reverse
-        #pragma omp parallel
-        {
-            int tid = omp_get_thread_num();
-            int nT = omp_get_num_threads();
-
-            int range = W - wi + 1;
-            if (range <= 0) { /* nothing to update */ }
-            else {
-
-            int blockSize = (range + nT - 1) / nT;
-            int myStart = wi + tid * blockSize;
-            int myEnd = std::min(W, myStart + blockSize - 1);
-
-            for (int w = myEnd; w >= myStart; --w)
-                dp[w] = std::max(dp[w], dp[w - wi] + vi);
-            }
-        }
-    }
-    return dp[W];
-}
-
 long long solveAntiDiag_Parallel(const KnapsackInstance& inst, int numThreads) {
-    int n = inst.n, W = inst.W;
+    long long W = inst.W;
+    int n = inst.n;
     std::vector<long long> prev(W + 1, 0), curr(W + 1, 0);
 
     omp_set_num_threads(numThreads);
@@ -106,7 +74,7 @@ long long solveAntiDiag_Parallel(const KnapsackInstance& inst, int numThreads) {
         int vi = inst.values[i];
 
         #pragma omp parallel for schedule(static)
-        for (int w = 0; w <= W; ++w) {
+        for (long long w = 0; w <= W; ++w) {
             if (w >= wi)
                 curr[w] = std::max(prev[w], prev[w - wi] + vi);
             else
@@ -119,18 +87,20 @@ long long solveAntiDiag_Parallel(const KnapsackInstance& inst, int numThreads) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <input_file> [num_threads]\n";
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <num_items> <capacity> [num_threads]\n";
         return 1;
     }
 
-    KnapsackInstance inst = readInput(argv[1]);
-    int numThreads = (argc > 2) ? std::stoi(argv[2]) : 1;
+    int n_items = std::stoi(argv[1]);
+    long long cap = std::stoll(argv[2]);
+    KnapsackInstance inst = generateRandom(n_items, cap);
+    int numThreads = (argc > 3) ? std::stoi(argv[3]) : omp_get_max_threads();
 
     std::cout << "═══════════════════════════════════════════════════════\n"
               << " CPU-Optimized 0/1 Knapsack\n"
               << "═══════════════════════════════════════════════════════\n"
-              << " Instance  : " << argv[1] << "\n"
+              << " Instance  : random n=" << inst.n << " W=" << inst.W << " (seed=42)\n"
               << " Items     : " << inst.n << "   Capacity: " << inst.W << "\n"
               << " Threads   : " << numThreads << "\n";
 
