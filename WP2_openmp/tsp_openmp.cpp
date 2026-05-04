@@ -29,7 +29,8 @@
  * Advisor  : Prof. Dr. Hasan BULUT
  *
  * Build    : see Makefile  (requires libomp on macOS: brew install libomp)
- * Run      : ./tsp_openmp <num_cities> [max_iter] [init_temp] [cooling_rate] [num_threads]
+ * Run      : ./tsp_openmp random <n> [max_iter] [init_temp] [cooling_rate] [num_threads]
+ *            ./tsp_openmp file   <tsp_file> [max_iter] [init_temp] [cooling_rate] [num_threads]
  */
 
 #include <iostream>
@@ -63,6 +64,32 @@ std::vector<City> generateRandomCities(int n, unsigned seed = 42) {
         cities[i].id = i;
         cities[i].x = coordDist(rng);
         cities[i].y = coordDist(rng);
+    }
+    return cities;
+}
+
+std::vector<City> readTSPLIB(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "[ERROR] Cannot open file: " << filename << "\n";
+        std::exit(EXIT_FAILURE);
+    }
+    std::vector<City> cities;
+    std::string line;
+    bool inNodes = false;
+    while (std::getline(file, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        if (line == "NODE_COORD_SECTION") { inNodes = true;  continue; }
+        if (line == "EOF")                { break; }
+        if (inNodes && !line.empty()) {
+            std::istringstream iss(line);
+            City c;
+            if (iss >> c.id >> c.x >> c.y) {
+                c.id--;
+                cities.push_back(c);
+            }
+        }
     }
     return cities;
 }
@@ -213,50 +240,63 @@ ThreadResult runSA(const DistMatrix& dm,
 // ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
+    if (argc < 3) {
         std::cerr
-            << "Usage: " << argv[0]
-            << " <num_cities> [max_iter] [init_temp] [cooling_rate] [num_threads]\n";
+            << "Usage:\n  " << argv[0]
+            << " random <n> [max_iter] [init_temp] [cooling_rate] [num_threads]\n  "
+            << argv[0]
+            << " file   <tsp_file> [max_iter] [init_temp] [cooling_rate] [num_threads]\n";
         return EXIT_FAILURE;
     }
 
-    // ── Generate random instance ─────────────────────────────────────────────
-    const int  n      = std::stoi(argv[1]);
-    const auto cities = generateRandomCities(n);
+    const std::string mode = argv[1];
+    std::vector<City> cities;
+    std::string instanceDesc;
 
-    // ── Parse optional parameters ────────────────────────────────────────────
-    const long long maxIter     = (argc > 2) ? std::stoll(argv[2])          : (long long)n * n * 100;
-    const double    initTemp    = (argc > 3) ? std::stod(argv[3])           : 1000.0;
+    if (mode == "random") {
+        const int n = std::stoi(argv[2]);
+        cities = generateRandomCities(n);
+        instanceDesc = "random " + std::to_string(n) + " cities (seed=42)";
+    } else if (mode == "file") {
+        cities = readTSPLIB(argv[2]);
+        instanceDesc = std::string(argv[2]);
+    } else {
+        std::cerr << "[ERROR] First argument must be 'random' or 'file'.\n";
+        return EXIT_FAILURE;
+    }
 
-    // Parse numThreads BEFORE coolingRate so the auto-computation uses the
-    // correct per-thread iteration count.
-    int numThreads = (argc > 5) ? std::stoi(argv[5]) : omp_get_max_threads();
+    const int n = static_cast<int>(cities.size());
+    if (n < 2) {
+        std::cerr << "[ERROR] Need at least 2 cities.\n";
+        return EXIT_FAILURE;
+    }
+
+    // Optional args start at argv[3] for both modes
+    const long long maxIter  = (argc > 3) ? std::stoll(argv[3]) : (long long)n * n * 100;
+    const double    initTemp = (argc > 4) ? std::stod(argv[4]) : 1000.0;
+
+    int numThreads = (argc > 6) ? std::stoi(argv[6]) : omp_get_max_threads();
     if (numThreads > omp_get_max_threads())
         numThreads = omp_get_max_threads();
     omp_set_num_threads(numThreads);
 
-    // Auto-compute coolingRate so each chain decays from initTemp to ~1e-9
-    // over its share of iterations (maxIter / numThreads).
     const long long itersForCooling = std::max(1LL, maxIter / numThreads);
-    const double    coolingRate = (argc > 4) ? std::stod(argv[4])
+    const double    coolingRate = (argc > 5) ? std::stod(argv[5])
                                  : std::exp(std::log(1e-9 / initTemp) / static_cast<double>(itersForCooling));
 
-    // ── Build distance matrix (shared read-only across all threads) ──────────
     DistMatrix dm(n);
     dm.build(cities);
 
-    // ── Nearest-Neighbour baseline ───────────────────────────────────────────
     const auto   nnTour = nearestNeighbourTour(dm, 0);
     const double nnCost = tourCost(nnTour, dm);
 
-    // Each thread gets an equal share; last thread absorbs the remainder.
     const long long itersBase      = maxIter / numThreads;
     const long long itersRemainder = maxIter % numThreads;
 
     std::cout << "═══════════════════════════════════════════════════════\n";
     std::cout << " WP2 – TSP OpenMP Parallel (Simulated Annealing)\n";
     std::cout << "═══════════════════════════════════════════════════════\n";
-    std::cout << " Instance       : random " << n << " cities (seed=42)\n";
+    std::cout << " Instance       : " << instanceDesc << "\n";
     std::cout << " max_iter       : " << maxIter        << "\n";
     std::cout << " iters/thread   : " << itersBase << " (+" << itersRemainder << " remainder)\n";
     std::cout << " init_temp      : " << initTemp       << "\n";

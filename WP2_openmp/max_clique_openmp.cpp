@@ -34,7 +34,8 @@
  * Advisor  : Prof. Dr. Hasan BULUT
  *
  * Build    : see Makefile  (requires libomp on macOS: brew install libomp)
- * Run      : ./max_clique_openmp <num_vertices> <density_percent> [num_threads]
+ * Run      : ./max_clique_openmp random <n> <density_percent> [num_threads]
+ *            ./max_clique_openmp file   <dimacs_file> [num_threads]
  */
 
 #include <iostream>
@@ -130,25 +131,77 @@ Graph generateRandomGraph(int n, int densityPct, unsigned seed = 42) {
     return G;
 }
 
+Graph readDIMACS(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "[ERROR] Cannot open file: " << filename << "\n";
+        std::exit(EXIT_FAILURE);
+    }
+    int n = 0, m = 0;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == 'c') continue;
+        if (line[0] == 'p') {
+            std::istringstream iss(line);
+            std::string t1, t2;
+            iss >> t1 >> t2 >> n >> m;
+            break;
+        }
+    }
+    Graph G(n);
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == 'c') continue;
+        if (line[0] == 'e') {
+            std::istringstream iss(line);
+            char ch;
+            int u, v;
+            iss >> ch >> u >> v;
+            G.addEdge(u - 1, v - 1);
+        }
+    }
+    return G;
+}
+
 // ---------------------------------------------------------------------------
 //  Main
 // ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <num_vertices> <density_percent> [num_threads]\n";
+        std::cerr << "Usage:\n  " << argv[0]
+                  << " random <n> <density_percent> [num_threads]\n  "
+                  << argv[0] << " file   <dimacs_file> [num_threads]\n";
         return EXIT_FAILURE;
     }
 
-    int nVert = std::stoi(argv[1]);
-    int densityPct = std::stoi(argv[2]);
-    const Graph G = generateRandomGraph(nVert, densityPct);
-    int numThreads = (argc > 3) ? std::stoi(argv[3]) : omp_get_max_threads();
+    Graph G(1);
+    std::string instanceLine;
+    int numThreads = 0;
+
+    const std::string mode = argv[1];
+    if (mode == "random") {
+        if (argc < 4) {
+            std::cerr << "Usage: " << argv[0] << " random <n> <density_percent> [num_threads]\n";
+            return EXIT_FAILURE;
+        }
+        int nVert = std::stoi(argv[2]);
+        int densityPct = std::stoi(argv[3]);
+        G = generateRandomGraph(nVert, densityPct);
+        instanceLine = "random n=" + std::to_string(G.n) + " density=" + std::to_string(densityPct) + "% (seed=42)";
+        numThreads = (argc > 4) ? std::stoi(argv[4]) : omp_get_max_threads();
+    } else if (mode == "file") {
+        G = readDIMACS(argv[2]);
+        instanceLine = std::string(argv[2]);
+        numThreads = (argc > 3) ? std::stoi(argv[3]) : omp_get_max_threads();
+    } else {
+        std::cerr << "[ERROR] First argument must be 'random' or 'file'.\n";
+        return EXIT_FAILURE;
+    }
+
     if (numThreads > omp_get_max_threads())
         numThreads = omp_get_max_threads();
     omp_set_num_threads(numThreads);
 
-    // Vertex ordering: descending degree (same as serial)
     const int n = G.n;
     std::vector<int> order(n);
     std::iota(order.begin(), order.end(), 0);
@@ -158,7 +211,7 @@ int main(int argc, char* argv[]) {
     std::cout << "═══════════════════════════════════════════════════════\n";
     std::cout << " WP2 – Maximum Clique Problem (OpenMP Parallel)\n";
     std::cout << "═══════════════════════════════════════════════════════\n";
-    std::cout << " Instance    : random n=" << G.n << " density=" << densityPct << "% (seed=42)\n";
+    std::cout << " Instance    : " << instanceLine << "\n";
     std::cout << " Vertices    : " << G.n << "\n";
     std::cout << " Edges       : " << G.m << "\n";
     std::cout << " Threads     : " << numThreads << "\n";

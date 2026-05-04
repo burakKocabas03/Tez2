@@ -14,7 +14,7 @@
  *   - L1/L2 cache can hold entire DP row for moderate capacities
  *
  * Build: g++ -O3 -std=c++17 -fopenmp -o knapsack_cpu_opt knapsack_cpu_opt.cpp
- * Run:   ./knapsack_cpu_opt <num_items> <capacity> [num_threads]
+ * Run:   ./knapsack_cpu_opt random <num_items> <capacity> [num_threads]
  */
 
 #include <iostream>
@@ -23,6 +23,7 @@
 #include <chrono>
 #include <iomanip>
 #include <random>
+#include <string>
 #include <omp.h>
 
 struct KnapsackInstance {
@@ -87,15 +88,20 @@ long long solveAntiDiag_Parallel(const KnapsackInstance& inst, int numThreads) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <num_items> <capacity> [num_threads]\n";
+    if (argc < 4) {
+        std::cerr << "Usage: " << argv[0] << " random <num_items> <capacity> [num_threads]\n";
         return 1;
     }
 
-    int n_items = std::stoi(argv[1]);
-    long long cap = std::stoll(argv[2]);
+    if (std::string(argv[1]) != "random") {
+        std::cerr << "[ERROR] Knapsack supports only 'random' mode (file input not implemented).\n";
+        return 1;
+    }
+
+    int n_items = std::stoi(argv[2]);
+    long long cap = std::stoll(argv[3]);
     KnapsackInstance inst = generateRandom(n_items, cap);
-    int numThreads = (argc > 3) ? std::stoi(argv[3]) : omp_get_max_threads();
+    int numThreads = (argc > 4) ? std::stoi(argv[4]) : omp_get_max_threads();
 
     std::cout << "═══════════════════════════════════════════════════════\n"
               << " CPU-Optimized 0/1 Knapsack\n"

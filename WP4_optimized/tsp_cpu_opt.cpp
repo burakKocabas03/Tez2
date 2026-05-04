@@ -10,7 +10,8 @@
  *   - Multi-start via OpenMP island model
  *
  * Build: g++ -O3 -std=c++17 -fopenmp -o tsp_cpu_opt tsp_cpu_opt.cpp
- * Run:   ./tsp_cpu_opt <num_cities> [max_iter] [init_temp] [num_threads]
+ * Run:   ./tsp_cpu_opt random <n> [max_iter] [init_temp] [num_threads]
+ *        ./tsp_cpu_opt file   <tsp_file> [max_iter] [init_temp] [num_threads]
  */
 
 #include <iostream>
@@ -19,15 +20,71 @@
 #include <random>
 #include <algorithm>
 #include <chrono>
+#include <fstream>
+#include <sstream>
 #include <iomanip>
 #include <limits>
+#include <string>
 #include <omp.h>
+
+struct City {
+    int id;
+    double x, y;
+};
+
+std::vector<City> generateRandomCities(int n, unsigned seed = 42) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> coordDist(0.0, 1000.0);
+    std::vector<City> cities(n);
+    for (int i = 0; i < n; ++i) {
+        cities[i].id = i;
+        cities[i].x = coordDist(rng);
+        cities[i].y = coordDist(rng);
+    }
+    return cities;
+}
+
+std::vector<City> readTSPLIB(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "[ERROR] Cannot open file: " << filename << "\n";
+        std::exit(1);
+    }
+    std::vector<City> cities;
+    std::string line;
+    bool inNodes = false;
+    while (std::getline(file, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+            line.pop_back();
+        if (line == "NODE_COORD_SECTION") { inNodes = true;  continue; }
+        if (line == "EOF")                { break; }
+        if (inNodes && !line.empty()) {
+            std::istringstream iss(line);
+            City c;
+            if (iss >> c.id >> c.x >> c.y) {
+                c.id--;
+                cities.push_back(c);
+            }
+        }
+    }
+    return cities;
+}
 
 struct DistMatrix {
     int n = 0;
     std::vector<double> data;
     explicit DistMatrix(int n_) : n(n_), data((size_t)n_ * n_, 0.0) {}
     inline double get(int i, int j) const { return data[i * n + j]; }
+    void build(const std::vector<City>& cities) {
+        for (int i = 0; i < n; ++i)
+            for (int j = i + 1; j < n; ++j) {
+                double dx = cities[i].x - cities[j].x;
+                double dy = cities[i].y - cities[j].y;
+                double d = std::sqrt(dx * dx + dy * dy);
+                data[i * n + j] = d;
+                data[j * n + i] = d;
+            }
+    }
 };
 
 double tourCost(const std::vector<int>& tour, const DistMatrix& dm) {
@@ -145,34 +202,46 @@ SAResult runSA_3opt(const DistMatrix& dm, double initTemp, double coolRate,
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <num_cities> [max_iter] [init_temp] [num_threads]\n";
+    if (argc < 3) {
+        std::cerr << "Usage:\n  " << argv[0]
+                  << " random <n> [max_iter] [init_temp] [num_threads]\n  "
+                  << argv[0] << " file   <tsp_file> [max_iter] [init_temp] [num_threads]\n";
         return 1;
     }
 
-    int n = std::stoi(argv[1]);
-    long long maxIter = (argc > 2) ? std::stoll(argv[2]) : (long long)n * n * 10;
-    double initTemp = (argc > 3) ? std::stod(argv[3]) : 1000.0;
-    int numThreads = (argc > 4) ? std::stoi(argv[4]) : omp_get_max_threads();
+    std::vector<City> cities;
+    std::string instanceDesc;
+    const std::string mode = argv[1];
+    if (mode == "random") {
+        int n0 = std::stoi(argv[2]);
+        cities = generateRandomCities(n0);
+        instanceDesc = "random " + std::to_string(n0) + " cities (seed=42)";
+    } else if (mode == "file") {
+        cities = readTSPLIB(argv[2]);
+        instanceDesc = argv[2];
+    } else {
+        std::cerr << "[ERROR] First argument must be 'random' or 'file'.\n";
+        return 1;
+    }
+
+    int n = (int)cities.size();
+    if (n < 2) {
+        std::cerr << "[ERROR] Need at least 2 cities.\n";
+        return 1;
+    }
+
+    long long maxIter = (argc > 3) ? std::stoll(argv[3]) : (long long)n * n * 10;
+    double initTemp = (argc > 4) ? std::stod(argv[4]) : 1000.0;
+    int numThreads = (argc > 5) ? std::stoi(argv[5]) : omp_get_max_threads();
     omp_set_num_threads(numThreads);
 
-    // Generate random cities
-    std::mt19937 genRng(42);
-    std::uniform_real_distribution<double> coordDist(0.0, 1000.0);
-
     DistMatrix dm(n);
-    std::vector<double> cx(n), cy(n);
-    for (int i = 0; i < n; ++i) { cx[i] = coordDist(genRng); cy[i] = coordDist(genRng); }
-    for (int i = 0; i < n; ++i)
-        for (int j = i + 1; j < n; ++j) {
-            double dx = cx[i] - cx[j], dy = cy[i] - cy[j];
-            double d = std::sqrt(dx * dx + dy * dy);
-            dm.data[i * n + j] = d;
-            dm.data[j * n + i] = d;
-        }
+    dm.build(cities);
 
-    long long itersPerThread = maxIter / numThreads;
-    double coolRate = std::exp(std::log(1e-9 / initTemp) / (double)itersPerThread);
+    const long long itersBase = maxIter / numThreads;
+    const long long itersRem = maxIter % numThreads;
+    const long long itersForCool = std::max(1LL, itersBase + itersRem);
+    double coolRate = std::exp(std::log(1e-9 / initTemp) / (double)itersForCool);
 
     double nnCost = tourCost(nearestNeighbourTour(dm, 0), dm);
 
@@ -186,8 +255,9 @@ int main(int argc, char* argv[]) {
         int tid = omp_get_thread_num();
         int startCity = (tid * n) / numThreads;
         unsigned seed = 42u + (unsigned)tid * 1000u;
+        long long myIters = itersBase + ((tid == numThreads - 1) ? itersRem : 0);
 
-        auto res = runSA_3opt(dm, initTemp, coolRate, itersPerThread, startCity, seed);
+        auto res = runSA_3opt(dm, initTemp, coolRate, myIters, startCity, seed);
 
         #pragma omp critical
         {
@@ -205,7 +275,7 @@ int main(int argc, char* argv[]) {
     std::cout << "═══════════════════════════════════════════════════════\n"
               << " CPU-Optimized TSP (SA + 2-opt/3-opt, " << numThreads << " threads)\n"
               << "═══════════════════════════════════════════════════════\n"
-              << " Instance       : random " << n << " cities (seed=42)\n"
+              << " Instance       : " << instanceDesc << "\n"
               << " NN cost        : " << nnCost << "\n"
               << " Best tour cost : " << globalBestCost << "\n"
               << " Improvement    : " << 100.0*(nnCost - globalBestCost)/nnCost << " %\n"

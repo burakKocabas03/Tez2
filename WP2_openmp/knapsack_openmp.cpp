@@ -54,7 +54,7 @@
  * Advisor  : Prof. Dr. Hasan BULUT
  *
  * Build    : see Makefile  (requires libomp on macOS: brew install libomp)
- * Run      : ./knapsack_openmp <num_items> <capacity> [num_threads]
+ * Run      : ./knapsack_openmp random <num_items> <capacity> [num_threads]
  */
 
 #include <iostream>
@@ -158,15 +158,20 @@ KnapsackResult solveKnapsack(const KnapsackInstance& inst, int numThreads) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
-    if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <num_items> <capacity> [num_threads]\n";
+    if (argc < 4) {
+        std::cerr << "Usage: " << argv[0] << " random <num_items> <capacity> [num_threads]\n";
         return EXIT_FAILURE;
     }
 
-    int n_items = std::stoi(argv[1]);
-    long long cap = std::stoll(argv[2]);
+    if (std::string(argv[1]) != "random") {
+        std::cerr << "[ERROR] Knapsack supports only 'random' mode (file input not implemented).\n";
+        return EXIT_FAILURE;
+    }
+
+    int n_items = std::stoi(argv[2]);
+    long long cap = std::stoll(argv[3]);
     const auto inst = generateRandom(n_items, cap);
-    int numThreads  = (argc > 3) ? std::stoi(argv[3]) : omp_get_max_threads();
+    int numThreads  = (argc > 4) ? std::stoi(argv[4]) : omp_get_max_threads();
     if (numThreads > omp_get_max_threads())
         numThreads = omp_get_max_threads();
 

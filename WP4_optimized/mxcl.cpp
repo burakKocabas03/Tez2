@@ -15,6 +15,8 @@
 #include <numeric>
 #include <atomic>
 #include <random>
+#include <fstream>
+#include <sstream>
 #include <omp.h>
 
 static constexpr int WORD_BITS = 64;
@@ -58,6 +60,37 @@ Graph generateRandomGraph(int n, double densityPct, unsigned seed = 42) {
         for (int v = u + 1; v < n; ++v)
             if (pctDist(rng) < densityPct)
                 G.addEdge(u, v);
+    return G;
+}
+
+Graph readDIMACS(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "[ERROR] Cannot open file: " << filename << "\n";
+        std::exit(EXIT_FAILURE);
+    }
+    int n = 0, m = 0;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == 'c') continue;
+        if (line[0] == 'p') {
+            std::istringstream iss(line);
+            std::string t1, t2;
+            iss >> t1 >> t2 >> n >> m;
+            break;
+        }
+    }
+    Graph G(n);
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == 'c') continue;
+        if (line[0] == 'e') {
+            std::istringstream iss(line);
+            char ch;
+            int u, v;
+            iss >> ch >> u >> v;
+            G.addEdge(u - 1, v - 1);
+        }
+    }
     return G;
 }
 
@@ -152,16 +185,38 @@ void bk_tomita(const Graph& G,
 /* ------------------------------------------------------------------ */
 int main(int argc, char* argv[]) {
     if (argc < 3) {
-        std::cerr << "Usage: " << argv[0] << " <num_vertices> <density_percent> [num_threads]\n"
-                  << "  e.g. " << argv[0] << " 100 50.5 16\n";
+        std::cerr << "Usage:\n  " << argv[0]
+                  << " random <num_vertices> <density_percent> [num_threads]\n  "
+                  << argv[0] << " file   <dimacs_file> [num_threads]\n";
         return 1;
     }
 
-    int nVert = std::stoi(argv[1]);
-    double densityPct = std::stod(argv[2]);   // FIX: double density
-    int numThreads = (argc > 3) ? std::stoi(argv[3]) : omp_get_max_threads();
+    Graph G(1);
+    std::string instanceLine;
+    int numThreads = 0;
 
-    Graph G = generateRandomGraph(nVert, densityPct);
+    const std::string mode = argv[1];
+    if (mode == "random") {
+        if (argc < 4) {
+            std::cerr << "Usage: " << argv[0] << " random <num_vertices> <density_percent> [num_threads]\n";
+            return 1;
+        }
+        int nVert = std::stoi(argv[2]);
+        double densityPct = std::stod(argv[3]);
+        G = generateRandomGraph(nVert, densityPct);
+        instanceLine = "random n=" + std::to_string(G.n) + " density=" + std::to_string(densityPct) + "% (seed=42)";
+        numThreads = (argc > 4) ? std::stoi(argv[4]) : omp_get_max_threads();
+    } else if (mode == "file") {
+        G = readDIMACS(argv[2]);
+        instanceLine = std::string(argv[2]);
+        numThreads = (argc > 3) ? std::stoi(argv[3]) : omp_get_max_threads();
+    } else {
+        std::cerr << "[ERROR] First argument must be 'random' or 'file'.\n";
+        return 1;
+    }
+
+    if (numThreads > omp_get_max_threads())
+        numThreads = omp_get_max_threads();
     omp_set_num_threads(numThreads);
 
     int n = G.n;
@@ -216,7 +271,7 @@ int main(int argc, char* argv[]) {
     std::cout << "═══════════════════════════════════════════════════════\n"
               << " CPU-Optimized Max Clique (Tomita + Coloring)\n"
               << "═══════════════════════════════════════════════════════\n"
-              << " Instance    : random n=" << G.n << " density=" << densityPct << "% (seed=42)\n"
+              << " Instance    : " << instanceLine << "\n"
               << " Vertices    : " << G.n << "   Edges: " << G.m << "\n"
               << " Threads     : " << numThreads << "\n"
               << " Clique size : " << globalBest.load() << "\n"
