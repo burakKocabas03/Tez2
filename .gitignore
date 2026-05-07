@@ -1,13 +1,41 @@
-# Compiled binaries
-tsp_serial
-tsp_openmp
-tsp_cuda
-max_clique_serial
-max_clique_openmp
-max_clique_cuda
-knapsack_serial
-knapsack_openmp
-knapsack_cuda
+# Compiled binaries (in problem directories)
+TSP_SOLUTIONS/tsp_serial
+TSP_SOLUTIONS/tsp_openmp
+TSP_SOLUTIONS/tsp_cuda
+TSP_SOLUTIONS/tsp_cpu_opt
+TSP_SOLUTIONS/tsp_gpu_opt
+
+MCP_SOLUTIONS/max_clique_serial
+MCP_SOLUTIONS/max_clique_openmp
+MCP_SOLUTIONS/max_clique_cuda
+MCP_SOLUTIONS/max_clique_cpu_opt
+MCP_SOLUTIONS/max_clique_gpu_opt
+
+KNAPSACK_SOLUTIONS/knapsack_serial
+KNAPSACK_SOLUTIONS/knapsack_openmp
+KNAPSACK_SOLUTIONS/knapsack_cuda
+KNAPSACK_SOLUTIONS/knapscak_cpu_opt
+KNAPSACK_SOLUTIONS/knapsack_gpu_opt
+
+# Compiled binaries (legacy WP directories)
+WP1_serial/tsp_serial
+WP1_serial/max_clique_serial
+WP1_serial/knapsack_serial
+WP2_openmp/tsp_openmp
+WP2_openmp/max_clique_openmp
+WP2_openmp/knapsack_openmp
+WP3_cuda/tsp_cuda
+WP3_cuda/max_clique_cuda
+WP3_cuda/knapsack_cuda
+WP4_optimized/tsp_cpu_opt
+WP4_optimized/max_clique_cpu_opt
+WP4_optimized/knapsack_cpu_opt
+WP4_optimized/tsp_gpu_opt
+WP4_optimized/max_clique_gpu_opt
+WP4_optimized/knapsack_gpu_opt
+
+# Object files
+*.o
 
 # Benchmark results (regenerated each run)
 benchmark/results*.csv
