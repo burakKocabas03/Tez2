@@ -22,7 +22,7 @@ endif
 SERIAL_TARGETS  = knapsack_serial
 OMP_TARGETS     = knapsack_openmp
 CUDA_TARGETS    = knapsack_cuda
-CPU_OPT_TARGETS = knapscak_cpu_opt
+CPU_OPT_TARGETS = knapsack_cpu_opt
 GPU_OPT_TARGETS = knapsack_gpu_opt
 
 CPU_ALL  = $(SERIAL_TARGETS) $(OMP_TARGETS) $(CPU_OPT_TARGETS)
@@ -61,7 +61,7 @@ knapsack_cuda: knapsack_cuda.cu
 	$(NVCC) $(NVFLAGS) -o $@ $<
 	@echo "  Built: $@"
 
-knapscak_cpu_opt: knapscak_cpu_opt.cpp
+knapsack_cpu_opt: knapsack_cpu_opt.cpp
 	$(CXX) $(CXXFLAGS) $(OMPFLAGS) -o $@ $< $(OMPLDFLAGS)
 	@echo "  Built: $@"
 
