@@ -73,11 +73,28 @@ Tez2/
 
 ## Build
 
-### Prerequisites (macOS)
+### Prerequisites
+
+#### macOS (Apple Silicon / Intel)
 
 ```bash
 brew install libomp   # required for OpenMP on Apple Clang
 ```
+
+#### Linux (x86_64)
+
+```bash
+# Ubuntu / Debian
+sudo apt install g++ make
+
+# OpenMP is built into GCC — no extra package needed
+
+# For CUDA (WP3 / GPU targets)
+# Install NVIDIA CUDA Toolkit: https://developer.nvidia.com/cuda-downloads
+```
+
+> **Note:** Makefile'lar işletim sistemini otomatik algılar (`uname -s`).  
+> macOS'ta Homebrew libomp, Linux'ta GCC'nin dahili OpenMP desteği kullanılır.
 
 ### Compile by problem
 
