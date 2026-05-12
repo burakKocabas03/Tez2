@@ -633,7 +633,7 @@ std::vector<int> greedyMergeComponents(std::vector<std::vector<int>> subtours,
       part2.push_back(s2[(bestPj + k) % n2]);
     }
 
-    if (bestReverseSecond) {
+    if (!bestReverseSecond) {
       std::reverse(part2.begin(), part2.end());
     }
 
@@ -803,7 +803,7 @@ Individual runEAXInspiredGA(const DistMatrix &dm, int popSize, int maxGen,
   const int maxStagnation = std::max(100, n);
 
   // More meaningful than only numThreads trials per generation.
-  const int trialsPerGeneration = numThreads;
+  const int trialsPerGeneration = std::min(popSize, numThreads * 2);
 
   for (int gen = 0; gen < maxGen && stagnation < maxStagnation; ++gen) {
     bool anyImproved = false;
