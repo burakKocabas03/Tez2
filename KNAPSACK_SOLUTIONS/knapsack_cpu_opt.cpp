@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <sstream>
 #include <iomanip>
 #include <string>
 #include <random>
@@ -29,8 +30,8 @@
 struct KnapsackInstance {
     int n = 0;
     long long W = 0;
-    std::vector<int> weights;
-    std::vector<int> values;
+    std::vector<long long> weights;
+    std::vector<long long> values;
 };
 
 /* ------------------------------------------------------------------ */
@@ -40,10 +41,33 @@ KnapsackInstance readInput(const std::string& filename) {
     std::ifstream file(filename);
     if (!file.is_open()) { std::cerr << "Cannot open " << filename << "\n"; std::exit(1); }
     KnapsackInstance inst;
-    file >> inst.n >> inst.W;
-    inst.weights.resize(inst.n);
-    inst.values.resize(inst.n);
-    for (int i = 0; i < inst.n; ++i) file >> inst.values[i] >> inst.weights[i];
+
+    // Auto-detect format by reading the first line
+    std::string firstLine;
+    std::getline(file, firstLine);
+    std::istringstream iss(firstLine);
+
+    long long a, b;
+    iss >> a;
+    if (iss >> b) {
+        // Two numbers → Pisinger format: "N W", then "value weight"
+        inst.n = static_cast<int>(a);
+        inst.W = b;
+        inst.weights.resize(inst.n);
+        inst.values.resize(inst.n);
+        for (int i = 0; i < inst.n; ++i) file >> inst.values[i] >> inst.weights[i];
+    } else {
+        // Single number → test.in format: "N", then "idx value weight", last line "W"
+        inst.n = static_cast<int>(a);
+        inst.weights.resize(inst.n);
+        inst.values.resize(inst.n);
+        for (int i = 0; i < inst.n; ++i) {
+            int idx;
+            file >> idx >> inst.values[i] >> inst.weights[i];
+        }
+        file >> inst.W;
+    }
+
     return inst;
 }
 
@@ -66,14 +90,14 @@ KnapsackInstance generateRandom(int n, long long W, unsigned seed) {
 /*  Frontier — raw buffer                                             */
 /* ------------------------------------------------------------------ */
 struct Frontier {
-    int* w;                 // weights  (sorted ascending)
+    long long* w;           // weights  (sorted ascending)
     long long* v;           // values   (strictly increasing after prune)
     int size;
     int cap;
 
     explicit Frontier(int initial_cap = 16) : size(0) {
         cap = std::max(initial_cap, 4);
-        w = static_cast<int*>(std::malloc(sizeof(int) * cap));
+        w = static_cast<long long*>(std::malloc(sizeof(long long) * cap));
         v = static_cast<long long*>(std::malloc(sizeof(long long) * cap));
         if (!w || !v) { std::cerr << "OOM\n"; std::exit(1); }
     }
@@ -102,12 +126,12 @@ struct Frontier {
     void reserve(int new_cap) {
         if (new_cap <= cap) return;
         cap = new_cap * 2;
-        w = static_cast<int*>(std::realloc(w, sizeof(int) * cap));
+        w = static_cast<long long*>(std::realloc(w, sizeof(long long) * cap));
         v = static_cast<long long*>(std::realloc(v, sizeof(long long) * cap));
         if (!w || !v) { std::cerr << "OOM\n"; std::exit(1); }
     }
 
-    void push(int weight, long long value) {
+    void push(long long weight, long long value) {
         reserve(size + 1);
         w[size] = weight;
         v[size] = value;
@@ -127,7 +151,7 @@ Frontier merge_prune(const Frontier& A, const Frontier& B, long long W_cap) {
     int i = 0, j = 0;
     long long best_v = -1;
 
-    auto consider = [&](int weight, long long value) {
+    auto consider = [&](long long weight, long long value) {
         if (weight > W_cap) return;
         if (value > best_v) {
             C.w[C.size] = weight;
@@ -170,8 +194,8 @@ long long solveSparseDP(const KnapsackInstance& inst,
     max_frontier = 1;
 
     for (int i = 0; i < n; ++i) {
-        int wi = inst.weights[i];
-        int vi = inst.values[i];
+        long long wi = inst.weights[i];
+        long long vi = inst.values[i];
 
         // Build shifted frontier: every existing state + this item
         Frontier shifted(f.size + 2);
@@ -211,8 +235,8 @@ long long solve_dense_openmp(const KnapsackInstance& inst, int num_threads) {
     omp_set_num_threads(num_threads);
 
     for (int i = 0; i < n; ++i) {
-        int wi = inst.weights[i];
-        int vi = inst.values[i];
+        long long wi = inst.weights[i];
+        long long vi = inst.values[i];
         #pragma omp parallel for schedule(static)
         for (long long w = 0; w <= W; ++w) {
             curr[w] = (w >= wi) ? std::max(prev[w], prev[w - wi] + vi) : prev[w];
@@ -230,6 +254,11 @@ long long solve_hybrid(const KnapsackInstance& inst,
                        size_t& max_frontier)
 {
     // Dense is better when capacity is small (frontier ≈ W anyway)
+    // Also, dense is impossible when W > ~500M (memory limit)
+    if (inst.W > 500000000LL) {
+        // Force sparse — dense would need >4GB per row
+        return solveSparseDP(inst, max_frontier, num_threads);
+    }
     if (inst.W <= 50000 || inst.n <= 64) {
         max_frontier = static_cast<size_t>(inst.W);
         return solve_dense_openmp(inst, num_threads);

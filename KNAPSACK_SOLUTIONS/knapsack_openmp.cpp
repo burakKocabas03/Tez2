@@ -62,6 +62,7 @@
 #include <algorithm>
 #include <chrono>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <iomanip>
 #include <random>
@@ -75,8 +76,8 @@
 struct KnapsackInstance {
     int              n;
     long long        W;
-    std::vector<int> weight;
-    std::vector<int> value;
+    std::vector<long long> weight;
+    std::vector<long long> value;
 };
 
 KnapsackInstance generateRandom(int n, long long W, unsigned seed = 42) {
@@ -92,6 +93,45 @@ KnapsackInstance generateRandom(int n, long long W, unsigned seed = 42) {
         inst.weight[i] = distW(rng);
         inst.value[i] = distV(rng);
     }
+    return inst;
+}
+
+KnapsackInstance readInstance(const std::string& filename) {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "[ERROR] Cannot open file: " << filename << "\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    KnapsackInstance inst;
+
+    // Read first line to detect format
+    std::string firstLine;
+    std::getline(file, firstLine);
+    std::istringstream iss(firstLine);
+
+    long long a, b;
+    iss >> a;
+    if (iss >> b) {
+        // Two numbers on first line → Pisinger format: "N W"
+        inst.n = static_cast<int>(a);
+        inst.W = b;
+        inst.weight.resize(inst.n);
+        inst.value .resize(inst.n);
+        for (int i = 0; i < inst.n; ++i)
+            file >> inst.value[i] >> inst.weight[i];
+    } else {
+        // Single number → test.in format: "N", then "idx val wt", last line "W"
+        inst.n = static_cast<int>(a);
+        inst.weight.resize(inst.n);
+        inst.value .resize(inst.n);
+        for (int i = 0; i < inst.n; ++i) {
+            int idx;
+            file >> idx >> inst.value[i] >> inst.weight[i];
+        }
+        file >> inst.W;
+    }
+
     return inst;
 }
 
@@ -130,8 +170,8 @@ KnapsackResult solveKnapsack(const KnapsackInstance& inst, int numThreads) {
             const int src = i & 1;          // source row (already computed)
             const int dst = 1 - src;        // destination row (being computed)
 
-            const int wi = inst.weight[i];
-            const int vi = inst.value[i];
+            const long long wi = inst.weight[i];
+            const long long vi = inst.value[i];
 
             const long long* const p = dp[src].data();
             long long* const       c = dp[dst].data();
@@ -158,27 +198,49 @@ KnapsackResult solveKnapsack(const KnapsackInstance& inst, int numThreads) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
-    if (argc < 4) {
-        std::cerr << "Usage: " << argv[0] << " random <num_items> <capacity> [num_threads]\n";
+    if (argc < 2) {
+        std::cerr << "Usage:\n  " << argv[0]
+                  << " random <num_items> <capacity> [num_threads]\n  "
+                  << argv[0]
+                  << " file   <instance_file> [num_threads]\n";
         return EXIT_FAILURE;
     }
 
-    if (std::string(argv[1]) != "random") {
-        std::cerr << "[ERROR] Knapsack supports only 'random' mode (file input not implemented).\n";
+    const std::string mode = argv[1];
+    KnapsackInstance inst;
+    std::string instanceDesc;
+    int numThreads;
+
+    if (mode == "random") {
+        if (argc < 4) {
+            std::cerr << "Usage: " << argv[0] << " random <num_items> <capacity> [num_threads]\n";
+            return EXIT_FAILURE;
+        }
+        int n_items = std::stoi(argv[2]);
+        long long cap = std::stoll(argv[3]);
+        inst = generateRandom(n_items, cap);
+        instanceDesc = "random n=" + std::to_string(inst.n) + " W=" + std::to_string(inst.W) + " (seed=42)";
+        numThreads = (argc > 4) ? std::stoi(argv[4]) : omp_get_max_threads();
+    } else if (mode == "file") {
+        if (argc < 3) {
+            std::cerr << "Usage: " << argv[0] << " file <instance_file> [num_threads]\n";
+            return EXIT_FAILURE;
+        }
+        inst = readInstance(argv[2]);
+        instanceDesc = std::string(argv[2]);
+        numThreads = (argc > 3) ? std::stoi(argv[3]) : omp_get_max_threads();
+    } else {
+        std::cerr << "[ERROR] First argument must be 'random' or 'file'.\n";
         return EXIT_FAILURE;
     }
 
-    int n_items = std::stoi(argv[2]);
-    long long cap = std::stoll(argv[3]);
-    const auto inst = generateRandom(n_items, cap);
-    int numThreads  = (argc > 4) ? std::stoi(argv[4]) : omp_get_max_threads();
     if (numThreads > omp_get_max_threads())
         numThreads = omp_get_max_threads();
 
     std::cout << "═══════════════════════════════════════════════════════\n";
     std::cout << " WP2 – 0/1 Knapsack Problem (OpenMP Parallel DP)\n";
     std::cout << "═══════════════════════════════════════════════════════\n";
-    std::cout << " Instance    : random n=" << inst.n << " W=" << inst.W << " (seed=42)\n";
+    std::cout << " Instance    : " << instanceDesc << "\n";
     std::cout << " Items (n)   : " << inst.n   << "\n";
     std::cout << " Capacity (W): " << inst.W   << "\n";
     std::cout << " DP cells    : " << static_cast<long long>(inst.n) * (inst.W + 1) << "\n";

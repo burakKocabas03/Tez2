@@ -53,10 +53,13 @@
 struct KnapsackInstance {
     int              n;       // number of items
     long long        W;       // capacity
-    std::vector<int> weight;
-    std::vector<int> value;
+    std::vector<long long> weight;
+    std::vector<long long> value;
 };
 
+// Auto-detect format:
+//   Pisinger: first line "N W", then N lines "value weight"
+//   Test.in : first line "N", then N lines "index value weight", last line "W"
 KnapsackInstance readInstance(const std::string& filename) {
     std::ifstream file(filename);
     if (!file.is_open()) {
@@ -65,12 +68,33 @@ KnapsackInstance readInstance(const std::string& filename) {
     }
 
     KnapsackInstance inst;
-    file >> inst.n >> inst.W;
-    inst.weight.resize(inst.n);
-    inst.value .resize(inst.n);
 
-    for (int i = 0; i < inst.n; ++i)
-        file >> inst.weight[i] >> inst.value[i];
+    // Read first line to detect format
+    std::string firstLine;
+    std::getline(file, firstLine);
+    std::istringstream iss(firstLine);
+
+    long long a, b;
+    iss >> a;
+    if (iss >> b) {
+        // Two numbers on first line → Pisinger format: "N W"
+        inst.n = static_cast<int>(a);
+        inst.W = b;
+        inst.weight.resize(inst.n);
+        inst.value .resize(inst.n);
+        for (int i = 0; i < inst.n; ++i)
+            file >> inst.value[i] >> inst.weight[i];
+    } else {
+        // Single number → test.in format: "N", then "idx val wt", last line "W"
+        inst.n = static_cast<int>(a);
+        inst.weight.resize(inst.n);
+        inst.value .resize(inst.n);
+        for (int i = 0; i < inst.n; ++i) {
+            int idx;
+            file >> idx >> inst.value[i] >> inst.weight[i];
+        }
+        file >> inst.W;
+    }
 
     return inst;
 }
@@ -88,13 +112,20 @@ KnapsackResult solveKnapsack(const KnapsackInstance& inst) {
     const int       n = inst.n;
     const long long W = inst.W;
 
+    // Guard: if W is too large for dense DP, report and exit
+    if (W > 500000000LL) {  // >500M cells per row → impractical
+        std::cerr << "[ERROR] Capacity W=" << W << " too large for dense DP.\n";
+        std::cerr << "        Use knapsack_cpu_opt (sparse DP) instead.\n";
+        return {-1, 0};
+    }
+
     // Two-row rolling DP: prev[c] = best value with capacity c using items so far
     std::vector<long long> prev(W + 1, 0LL);
     std::vector<long long> curr(W + 1, 0LL);
 
     for (int i = 0; i < n; ++i) {
-        const int wi = inst.weight[i];
-        const int vi = inst.value[i];
+        const long long wi = inst.weight[i];
+        const long long vi = inst.value[i];
 
         for (long long c = 0; c <= W; ++c) {
             curr[c] = prev[c];                      // don't take item i
